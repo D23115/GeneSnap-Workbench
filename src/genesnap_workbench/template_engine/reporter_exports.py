@@ -28,8 +28,8 @@ from genesnap_workbench.template_engine.workbook_templates import (
 )
 from genesnap_workbench.project_workflow.project_folders import ProjectWorkspace
 
-from .syn_exports import GeneratedArtifact
 from .genbank_io import write_genbank_utf8
+from .syn_exports import GeneratedArtifact
 
 
 class ReporterExportError(ValueError):
@@ -136,21 +136,35 @@ def _write_primer_order(design, result, generated_at, path) -> None:
 def _primer_records(design, result) -> tuple[dict[str, object], ...]:
     unique = {}
     associations = {}
+    product_lengths = {}
     for construct, plan in _construct_pairs(design, result):
         for primer in (plan.forward_primer, plan.reverse_primer):
             unique.setdefault(primer.sequence, primer)
             associations.setdefault(primer.sequence, []).append(construct.construct_name)
-    return tuple(
-        {
-            "primer_name": primer.name,
-            "sequence": sequence,
-            "gene_symbol": design.gene_symbol,
-            "direction": primer.direction,
-            "length": len(sequence),
-            "note": ", ".join(associations[sequence]),
-        }
-        for sequence, primer in unique.items()
-    )
+            product_lengths.setdefault(primer.sequence, set()).add(
+                len(construct.insert_sequence),
+            )
+    records: list[dict[str, object]] = []
+    for sequence, primer in unique.items():
+        lengths = sorted(product_lengths[sequence])
+        records.append(
+            {
+                "primer_name": primer.name,
+                "sequence": sequence,
+                "gene_symbol": design.gene_symbol,
+                "gene_id": design.gene_id,
+                "transcript_accession": design.transcript_accession,
+                "direction": primer.direction,
+                "length": len(sequence),
+                "product_length": (
+                    lengths[0]
+                    if len(lengths) == 1
+                    else ", ".join(str(length) for length in lengths)
+                ),
+                "note": ", ".join(associations[sequence]),
+            },
+        )
+    return tuple(records)
 
 
 def _write_sequencing_order(
@@ -322,6 +336,7 @@ def export_reporter_bundle(
             primer_template_id,
             records=_primer_records(design, result),
             contact=contact_profile,
+            document_values={"order_date": generated_at.date()},
             output_path=primer_path,
         )
     else:

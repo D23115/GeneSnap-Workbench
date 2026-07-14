@@ -143,10 +143,10 @@ class ExpressionVectorProtocol:
             "kozak_sequence",
         ):
             object.__setattr__(self, field_name, normalize_dna(getattr(self, field_name)))
-        if self.left_boundary < 0 or self.right_boundary <= self.left_boundary:
-            raise ValueError("invalid expression insertion boundaries")
+        if self.left_boundary < 0 or self.right_boundary < self.left_boundary:
+            raise ValueError("表达载体插入边界无效：右边界不能小于左边界")
         if not 1 <= self.anneal_min_bp <= self.anneal_max_bp:
-            raise ValueError("invalid expression annealing length range")
+            raise ValueError("表达载体退火长度范围无效：最小长度必须不大于最大长度")
 
 
 @dataclass(frozen=True, slots=True)

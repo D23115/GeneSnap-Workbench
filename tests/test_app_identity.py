@@ -48,10 +48,7 @@ class ApplicationIdentityTests(unittest.TestCase):
             project_root / "packaging" / "GeneSnapWorkbench.iss"
         ).read_text(encoding="utf-8")
 
-        self.assertIn(
-            'icon=str(resources_root / "icons" / "genesnap_workbench.ico")',
-            spec_text,
-        )
+        self.assertIn('icon=str(resources_root / "icons" / "genesnap_workbench.ico")', spec_text)
         self.assertIn("SetupIconFile=", installer_text)
         self.assertIn("UninstallDisplayIcon=", installer_text)
 

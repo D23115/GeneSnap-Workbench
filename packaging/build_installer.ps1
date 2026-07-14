@@ -27,11 +27,11 @@ if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup 构建失败"
 }
 
-$Installer = Join-Path $ProjectRoot "release\installer\GeneSnapWorkbench_Setup_v0.3.3.exe"
+$Installer = Join-Path $ProjectRoot "release\installer\GeneSnapWorkbench_Setup_v0.3.4.exe"
 $Hash = Get-FileHash -LiteralPath $Installer -Algorithm SHA256
 Set-Content `
-    -LiteralPath (Join-Path $ProjectRoot "release\installer\GeneSnapWorkbench_Setup_v0.3.3.sha256") `
-    -Value "$($Hash.Hash.ToLowerInvariant())  GeneSnapWorkbench_Setup_v0.3.3.exe" `
+    -LiteralPath (Join-Path $ProjectRoot "release\installer\GeneSnapWorkbench_Setup_v0.3.4.sha256") `
+    -Value "$($Hash.Hash.ToLowerInvariant())  GeneSnapWorkbench_Setup_v0.3.4.exe" `
     -Encoding ASCII
 Write-Host "Windows installer: $Installer"
 Write-Host "SHA-256: $($Hash.Hash)"

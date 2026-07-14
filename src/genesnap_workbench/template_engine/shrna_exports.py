@@ -26,8 +26,8 @@ from genesnap_workbench.template_engine.workbook_templates import (
 )
 from genesnap_workbench.project_workflow.project_folders import ProjectWorkspace
 
-from .syn_exports import GeneratedArtifact
 from .genbank_io import write_genbank_utf8
+from .syn_exports import GeneratedArtifact
 
 
 class ShRNAExportError(ValueError):
@@ -152,8 +152,11 @@ def _primer_records(design: ShRNADesignVersion) -> tuple[dict[str, object], ...]
                     "primer_name": name,
                     "sequence": sequence,
                     "gene_symbol": design.gene_symbol,
+                    "gene_id": design.gene_id,
+                    "transcript_accession": design.transcript_accession,
                     "direction": direction,
                     "length": len(sequence),
+                    "product_length": len(sequence),
                 },
             )
     return tuple(records)
@@ -330,6 +333,7 @@ def export_shrna_bundle(
             primer_template_id,
             records=_primer_records(design),
             contact=contact_profile,
+            document_values={"order_date": generated_at.date()},
             output_path=primer_path,
         )
     else:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -10,7 +10,7 @@ import re
 from typing import Callable
 from uuid import uuid4
 
-from PySide6.QtCore import QDate, QThread, Qt, QUrl, Signal
+from PySide6.QtCore import QDate, QEvent, QObject, QThread, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -21,6 +21,8 @@ from PySide6.QtGui import (
     QPalette,
 )
 from PySide6.QtWidgets import (
+    QAbstractScrollArea,
+    QAbstractSpinBox,
     QAbstractItemView,
     QApplication,
     QCheckBox,
@@ -35,6 +37,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QInputDialog,
     QLabel,
+    QLayout,
     QLineEdit,
     QMainWindow,
     QMessageBox,
@@ -75,6 +78,7 @@ from genesnap_workbench.integrations.shrna_online import (
     ShRNAOnlineDesigner,
     ShRNAOnlineDesignResult,
 )
+from genesnap_workbench.sequence_core.dna import normalize_dna
 from genesnap_workbench.sequence_core.shrna import select_initial_candidates
 from genesnap_workbench.sequence_core.shrna_candidates import generate_shrna_candidates
 from genesnap_workbench.project_workflow.syn_materials import MaterialReadiness
@@ -86,6 +90,13 @@ from genesnap_workbench.storage.expression_repository import StoredExpressionPro
 from genesnap_workbench.storage.reporter_repository import StoredReporterProject
 from genesnap_workbench.vector_library.comparison import read_sequence_file
 from genesnap_workbench.vector_library.expression import validate_expression_protocol
+from genesnap_workbench.vector_library.expression_import import (
+    ExpressionInsertionResolution,
+    RestrictionSiteOccurrence,
+    resolve_manual_homology,
+    resolve_restriction_insertion,
+    scan_restriction_sites,
+)
 from genesnap_workbench.vector_library.reporter import validate_reporter_protocol
 from genesnap_workbench.vector_library.models import (
     ExpressionVectorProtocol,
@@ -280,24 +291,129 @@ def _project_clone_names(snapshot, prefix: str, initial_count: int) -> tuple[str
     )
 
 
-def _sequencing_tracking_rows(snapshot) -> tuple[tuple[str, str], ...]:
-    if not snapshot.sequencing_submissions:
-        return ()
-    latest = snapshot.sequencing_submissions[-1]
+def _molecular_tracking_rows(snapshot) -> tuple[tuple[str, str], ...]:
+    latest_internal_submission_no = ""
+    latest_vendor_order_no = ""
+    if snapshot.sequencing_submissions:
+        latest = snapshot.sequencing_submissions[-1]
+        latest_internal_submission_no = latest.internal_submission_no
+        latest_vendor_order_no = latest.vendor_order_no
     history = "；".join(
         (
             f"第{submission.round_no}轮 {submission.submission_kind} "
             f"{submission.status} / {len(submission.sample_names)}样本 / "
-            f"送测编号:{submission.internal_submission_no or '-'} / "
-            f"订单号:{submission.vendor_order_no or '-'}"
+            f"测序送样号:{submission.internal_submission_no or '-'} / "
+            f"测序订单号:{submission.vendor_order_no or '-'}"
         )
         for submission in snapshot.sequencing_submissions
     )
-    return (
-        ("最新送测编号", latest.internal_submission_no),
-        ("最新订单号", latest.vendor_order_no),
-        ("送测历史", history),
+    rows = (
+        ("内部编号", snapshot.internal_project_no),
+        ("引物送单号", snapshot.primer_submission_no),
+        ("引物订单号", snapshot.primer_vendor_order_no),
+        ("测序送样号", latest_internal_submission_no),
+        ("测序订单号", latest_vendor_order_no),
     )
+    if history:
+        rows += (("测序历史", history),)
+    return rows
+
+
+_HISTORY_EVENT_LABELS = {
+    "complete_design": "完成设计",
+    "mark_primers_ordered": "标记引物已订购",
+    "mark_primers_arrived": "标记引物已到货",
+    "start_cloning": "开始连接/转化",
+    "mark_sent": "标记为已送测",
+    "mark_sent_for_sequencing": "标记为已送测",
+    "analyze_sequencing": "分析测序",
+    "confirm_clone_usable": "人工确认克隆可用",
+    "confirm_clone_unusable": "人工确认克隆不可用",
+    "confirm_addon_sequencing": "生成加测送测表",
+    "restart_cloning": "重新连接/转化",
+    "post_rework_submission": "生成重做送测表",
+    "start_plasmid_prep": "开始质粒抽提",
+    "complete_plasmid_prep": "完成质粒抽提",
+    "complete_project": "确认项目完成",
+    "update_molecular_tracking_numbers": "修改项目/引物编号",
+    "update_sequencing_tracking": "修改测序编号",
+    "adjust_due_date": "修正标准完工日期",
+    "mark_abnormal_or_paused": "标记异常/暂停",
+    "resume_from_abnormal_or_paused": "恢复项目",
+    "hide_from_active_dashboard": "隐藏项目",
+    "restore_to_active_dashboard": "恢复项目显示",
+    "mark_materials_ordered": "标记 oligo 已订购",
+    "mark_materials_arrived": "标记 oligo 已到货",
+    "start_assembly": "开始合成组装",
+    "advance_assembly_substep": "推进合成组装步骤",
+    "correct_status": "修正项目状态",
+    "begin_initial_assembly_attempt": "开始首轮合成组装",
+    "start_initial_colony_screening": "开始首轮菌落筛选",
+    "create_colonies_for_active_round": "生成本轮菌落记录",
+    "record_colony_pcr": "记录菌落 PCR",
+    "record_assembly_step": "记录合成组装实验",
+    "select_clones_for_prep": "选择克隆进行质粒小提",
+    "record_plasmid_prep": "记录质粒小提",
+    "finish_plasmid_prep": "完成质粒小提",
+    "additional_screening": "追加筛选克隆",
+    "restart_assembly": "重新合成组装",
+    "confirm_sequencing": "确认 SYN 测序结果",
+}
+
+
+def _history_event_label(event_type: str | None) -> str:
+    if not event_type:
+        return "-"
+    return _HISTORY_EVENT_LABELS.get(
+        event_type,
+        f"未识别事件（{event_type}）",
+    )
+
+
+def _history_status_label(
+    status: str | None,
+    workflow_type: str,
+    *,
+    interruption_type: str | None = None,
+) -> str:
+    if not status:
+        return "-"
+    if status == "abnormal_or_paused":
+        if interruption_type == "abnormal":
+            return "异常"
+        if interruption_type == "pause":
+            return "暂停"
+        return "异常/暂停"
+    if workflow_type == "de_novo_gene_synthesis":
+        syn_labels = {
+            "materials_ordered": "oligo 已订购",
+            "materials_arrived": "oligo 已到货",
+            "syn_assembly_in_progress": "合成组装中",
+            "plasmid_prep_in_progress": "质粒抽提中",
+            "awaiting_sequencing_confirmation": "待测序确认",
+        }
+        if status in syn_labels:
+            return syn_labels[status]
+    labels = {
+        "recorded": "已录入",
+        "design_completed": "设计完成/待订购",
+        "primers_ordered": "引物已订购",
+        "primers_arrived": "引物已到货",
+        "materials_ordered": "引物已订购",
+        "materials_arrived": "引物已到货",
+        "cloning_in_progress": "连接转化中",
+        "sequencing_in_progress": "送测中",
+        "sequencing_pending_analysis": "测序待分析",
+        "add_on_in_progress": "加测中",
+        "rework_in_progress": "重做中",
+        "analysis_completed": "分析完成",
+        "plasmid_prep_in_progress": "复抽/质粒抽提中",
+        "plasmid_prep_completed": "质粒抽提完成",
+        "awaiting_sequencing_confirmation": "待测序确认",
+        "syn_assembly_in_progress": "合成组装中",
+        "project_completed": "项目完成",
+    }
+    return labels.get(status, f"未识别状态（{status}）")
 
 
 def ensure_chinese_font() -> None:
@@ -311,6 +427,37 @@ def ensure_chinese_font() -> None:
         if path.exists() and QFontDatabase.addApplicationFont(str(path)) >= 0:
             QApplication.setFont(QFont("Microsoft YaHei", 10))
             return
+
+
+class AccidentalWheelGuard(QObject):
+    """Prevent closed value editors from changing under a stray mouse wheel."""
+
+    _APPLICATION_ATTRIBUTE = "_genesnap_accidental_wheel_guard"
+
+    @classmethod
+    def install(cls, application: QApplication | None) -> AccidentalWheelGuard:
+        if application is None:
+            raise RuntimeError("QApplication must exist before installing wheel protection")
+        existing = getattr(application, cls._APPLICATION_ATTRIBUTE, None)
+        if isinstance(existing, cls):
+            return existing
+        guard = cls(application)
+        application.installEventFilter(guard)
+        setattr(application, cls._APPLICATION_ATTRIBUTE, guard)
+        return guard
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() is not QEvent.Type.Wheel:
+            return False
+        if isinstance(watched, QComboBox):
+            if watched.view().isVisible():
+                return False
+            event.accept()
+            return True
+        if isinstance(watched, QAbstractSpinBox):
+            event.accept()
+            return True
+        return False
 
 
 class CopyableTableWidget(QTableWidget):
@@ -352,6 +499,141 @@ class CopyableTableWidget(QTableWidget):
             event.accept()
             return
         super().keyPressEvent(event)
+
+
+@dataclass(frozen=True, slots=True)
+class _PlasmidPrepCandidate:
+    owner_id: str
+    owner_label: str
+    clone_name: str
+    judgment_source: str
+
+
+def _plasmid_prep_candidates(
+    stored: StoredExpressionProject | StoredShRNAProject | StoredReporterProject,
+) -> tuple[tuple[_PlasmidPrepCandidate, ...], tuple[tuple[str, str], ...]]:
+    if isinstance(stored, (StoredExpressionProject, StoredReporterProject)):
+        required_owners = tuple(
+            (construct.construct_id, construct.construct_name)
+            for construct in stored.design.constructs
+        )
+        owner_attribute = "construct_id"
+    else:
+        required_owners = tuple(
+            (target.target_id, f"Target {target.target_no}")
+            for target in stored.design.targets
+        )
+        owner_attribute = "target_id"
+
+    owner_labels = dict(required_owners)
+    owner_order = {
+        owner_id: index for index, (owner_id, _label) in enumerate(required_owners)
+    }
+    latest_by_clone = {
+        record.clone_name: record for record in stored.snapshot.clone_results
+    }
+    candidates = []
+    for record in latest_by_clone.values():
+        if record.status == "pass":
+            judgment_source = "自动判定 PASS"
+        elif record.manually_confirmed_usable:
+            judgment_source = "人工确认可用"
+        else:
+            continue
+        owner_id = getattr(record, owner_attribute)
+        if owner_id not in owner_labels:
+            continue
+        candidates.append(
+            _PlasmidPrepCandidate(
+                owner_id=owner_id,
+                owner_label=owner_labels[owner_id],
+                clone_name=record.clone_name,
+                judgment_source=judgment_source,
+            ),
+        )
+    candidates.sort(
+        key=lambda item: (owner_order[item.owner_id], item.clone_name),
+    )
+    return tuple(candidates), required_owners
+
+
+class PlasmidPrepSelectionDialog(QDialog):
+    def __init__(
+        self,
+        stored: StoredExpressionProject | StoredShRNAProject | StoredReporterProject,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("选择质粒抽提克隆")
+        self.resize(720, 420)
+        candidates, self._required_owners = _plasmid_prep_candidates(stored)
+
+        layout = QVBoxLayout(self)
+        prompt = QLabel("请为每个 Target/构建至少选择 1 个可用克隆。")
+        prompt.setWordWrap(True)
+        layout.addWidget(prompt)
+        self.table = CopyableTableWidget(len(candidates), 4)
+        self.table.setHorizontalHeaderLabels(
+            ("选择", "Target/构建", "克隆名", "判定来源"),
+        )
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+        self.table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.verticalHeader().setVisible(False)
+        for row, candidate in enumerate(candidates):
+            choice = QTableWidgetItem()
+            choice.setFlags(
+                choice.flags()
+                | Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsSelectable
+            )
+            choice.setCheckState(Qt.CheckState.Unchecked)
+            choice.setData(Qt.ItemDataRole.UserRole, candidate.owner_id)
+            self.table.setItem(row, 0, choice)
+            self.table.setItem(row, 1, QTableWidgetItem(candidate.owner_label))
+            self.table.setItem(row, 2, QTableWidgetItem(candidate.clone_name))
+            self.table.setItem(row, 3, QTableWidgetItem(candidate.judgment_source))
+        layout.addWidget(self.table, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def selected_clone_names(self) -> tuple[str, ...]:
+        return tuple(
+            self.table.item(row, 2).text()
+            for row in range(self.table.rowCount())
+            if self.table.item(row, 0).checkState() is Qt.CheckState.Checked
+        )
+
+    def accept(self) -> None:
+        selected_owner_ids = {
+            self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            for row in range(self.table.rowCount())
+            if self.table.item(row, 0).checkState() is Qt.CheckState.Checked
+        }
+        missing_labels = tuple(
+            label
+            for owner_id, label in self._required_owners
+            if owner_id not in selected_owner_ids
+        )
+        if missing_labels:
+            QMessageBox.warning(
+                self,
+                "抽提克隆未选完整",
+                "每个 Target/构建至少需要选择 1 个可用克隆。\n"
+                f"尚未选择：{', '.join(missing_labels)}",
+            )
+            return
+        super().accept()
 
 
 def _project_intake_layout(
@@ -683,6 +965,9 @@ class NewShRNAProjectDialog(QDialog):
         self.species = QComboBox()
         self.species.addItems(("human", "mouse", "rat"))
         self.transcript_accession = QLineEdit()
+        self._selected_gene_id: str | None = None
+        self.gene_symbol.textEdited.connect(self._clear_selected_gene_id)
+        self.transcript_accession.textEdited.connect(self._clear_selected_gene_id)
         transcript_row = QWidget()
         transcript_layout = QHBoxLayout(transcript_row)
         transcript_layout.setContentsMargins(0, 0, 0, 0)
@@ -750,6 +1035,7 @@ class NewShRNAProjectDialog(QDialog):
         self.vector_confirmation = QCheckBox(
             "已确认实际载体与所选 pLKO.1 protocol 相符",
         )
+        self.vector_confirmation.setChecked(True)
         form.addRow("项目号", self.project_id)
         form.addRow("基因", self.gene_symbol)
         form.addRow("物种", self.species)
@@ -793,6 +1079,9 @@ class NewShRNAProjectDialog(QDialog):
             if line.strip()
         )
 
+    def _clear_selected_gene_id(self, _text: str = "") -> None:
+        self._selected_gene_id = None
+
     def _lookup_transcript(self) -> None:
         candidate = _lookup_transcript_candidate(
             self,
@@ -807,6 +1096,7 @@ class NewShRNAProjectDialog(QDialog):
         if candidate.gene_symbol:
             self.gene_symbol.setText(candidate.gene_symbol)
         self.cds_sequence.setPlainText(candidate.cds_sequence)
+        self._selected_gene_id = candidate.gene_id
 
     def _generate_candidates(self) -> None:
         try:
@@ -1025,6 +1315,7 @@ class NewShRNAProjectDialog(QDialog):
             actor=actor,
             vector_sequence_confirmed=self.vector_confirmation.isChecked(),
             transcript_accession=self.transcript_accession.text().strip() or None,
+            gene_id=self._selected_gene_id,
             primer_vendor_name=_vendor_name_from_combo(self.primer_template_combo),
             sequencing_vendor_name=_vendor_name_from_combo(self.sequencing_template_combo),
             primer_template_id=self.primer_template_combo.currentData(),
@@ -1055,12 +1346,26 @@ class ImportExpressionProtocolDialog(QDialog):
 
         self.display_name = QLineEdit()
         self.protocol_version_id = QLineEdit()
+        self.vector_read_status = QLabel("尚未读取载体图谱")
+        self.vector_read_status.setWordWrap(True)
+        self.vector_read_status.setObjectName("mutedLabel")
+        self.insertion_mode = QComboBox()
+        self.insertion_mode.addItem(
+            "按酶切位点（推荐）",
+            "restriction_sites_auto_homology",
+        )
+        self.insertion_mode.addItem("手动粘贴同源臂", "manual_homology")
+        self.left_restriction_site = QComboBox()
+        self.right_restriction_site = QComboBox()
         self.left_boundary = QSpinBox()
         self.left_boundary.setRange(0, 10_000_000)
         self.right_boundary = QSpinBox()
         self.right_boundary.setRange(1, 10_000_000)
         self.left_homology = QLineEdit()
         self.right_homology = QLineEdit()
+        self.resolution_preview = QLabel("请选择载体图谱后解析插入位置")
+        self.resolution_preview.setWordWrap(True)
+        self.resolution_preview.setObjectName("mutedLabel")
         self.kozak = QLineEdit("GCCACC")
         self.stop_rule = QComboBox()
         self.stop_rule.addItem("去掉 stop，与 C 端标签融合", "remove_for_c_terminal_fusion")
@@ -1068,21 +1373,23 @@ class ImportExpressionProtocolDialog(QDialog):
         self.fusion_name = QLineEdit("3xFLAG")
 
         form.addRow("载体图谱", vector_row)
+        form.addRow("读取状态", self.vector_read_status)
         form.addRow("Protocol 显示名", self.display_name)
         form.addRow("Protocol 版本 ID", self.protocol_version_id)
+        form.addRow("插入位置确定方式", self.insertion_mode)
+        form.addRow("左侧酶切位点", self.left_restriction_site)
+        form.addRow("右侧酶切位点", self.right_restriction_site)
         form.addRow("左插入边界（0-based）", self.left_boundary)
         form.addRow("右插入边界（0-based）", self.right_boundary)
         form.addRow("F 引物载体同源序列", self.left_homology)
         form.addRow("R 引物载体同源序列", self.right_homology)
+        form.addRow("解析预览", self.resolution_preview)
         form.addRow("Kozak", self.kozak)
         form.addRow("终止密码子规则", self.stop_rule)
         form.addRow("C 端融合名称", self.fusion_name)
         layout.addLayout(form)
 
-        note = QLabel(
-            "当前入口用于导入已经确认过插入边界和同源臂的载体。"
-            "保存后，新项目可直接重复使用；载体校验值变化时会拒绝套用。",
-        )
+        note = QLabel("软件解析插入位置与引物同源臂；保存前仍需按实验 SOP 人工复核。")
         note.setWordWrap(True)
         note.setObjectName("mutedLabel")
         self.note = note
@@ -1098,6 +1405,16 @@ class ImportExpressionProtocolDialog(QDialog):
         buttons.accepted.connect(self._accept_validated)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+        self._restriction_occurrences: tuple[RestrictionSiteOccurrence, ...] = ()
+        self._updating_location = False
+        self.insertion_mode.currentIndexChanged.connect(self._on_insertion_mode_changed)
+        self.left_restriction_site.currentIndexChanged.connect(self._refresh_resolution_preview)
+        self.right_restriction_site.currentIndexChanged.connect(self._refresh_resolution_preview)
+        self.left_homology.textChanged.connect(self._refresh_resolution_preview)
+        self.right_homology.textChanged.connect(self._refresh_resolution_preview)
+        self._hide_boundary_inputs()
+        self._on_insertion_mode_changed()
 
     def _browse_vector(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(
@@ -1117,11 +1434,13 @@ class ImportExpressionProtocolDialog(QDialog):
         if len(records) != 1:
             raise ValueError("一个载体文件必须只包含一条序列")
         parsed = records[0]
+        file_topology = parsed.topology.strip().lower()
+        software_topology = "circular" if file_topology == "unknown" else file_topology
         provisional = VectorRecord.from_sequence(
             vector_record_id="pending",
             structural_display_name=Path(path).stem,
             sequence=parsed.sequence,
-            topology=parsed.topology if parsed.topology != "unknown" else "circular",
+            topology=software_topology,
             local_aliases=(Path(path).stem,),
         )
         self._vector = VectorRecord.from_sequence(
@@ -1132,12 +1451,164 @@ class ImportExpressionProtocolDialog(QDialog):
             local_aliases=provisional.local_aliases,
         )
         self.vector_path.setText(str(Path(path)))
+        if file_topology == "unknown":
+            topology_status = "文件拓扑：未提供；软件按环状载体处理"
+        elif file_topology == "linear":
+            topology_status = "文件拓扑：linear；软件按线性载体处理"
+        else:
+            topology_status = f"文件拓扑：{file_topology}；软件按环状载体处理"
+        self.vector_read_status.setText(
+            "已读取："
+            f"{Path(path).name}；格式：{parsed.format_name}；长度：{len(parsed.sequence)} bp；"
+            f"{topology_status}",
+        )
+        self._restriction_occurrences = scan_restriction_sites(self._vector.sequence)
+        self._populate_restriction_sites()
         if not self.display_name.text().strip():
             self.display_name.setText(f"{Path(path).stem} 表达 protocol")
         if not self.protocol_version_id.text().strip():
             self.protocol_version_id.setText(
                 f"{Path(path).stem}-expression-v1".replace(" ", "-"),
             )
+        self._refresh_resolution_preview()
+
+    def _hide_boundary_inputs(self) -> None:
+        for widget in (self.left_boundary, self.right_boundary):
+            label = self.form.labelForField(widget)
+            if label is not None:
+                label.hide()
+            widget.hide()
+
+    def _set_form_field_visible(self, widget: QWidget, visible: bool) -> None:
+        label = self.form.labelForField(widget)
+        if label is not None:
+            label.setVisible(visible)
+        widget.setVisible(visible)
+
+    @staticmethod
+    def _restriction_site_label(occurrence: RestrictionSiteOccurrence) -> str:
+        return (
+            f"{occurrence.enzyme_name}（{occurrence.recognition_sequence}）"
+            f"；0-based 出现位置 {occurrence.start}；切点 {occurrence.cut_position}"
+        )
+
+    def _populate_restriction_sites(self) -> None:
+        for combo in (self.left_restriction_site, self.right_restriction_site):
+            combo.blockSignals(True)
+            combo.clear()
+            for occurrence in self._restriction_occurrences:
+                combo.addItem(self._restriction_site_label(occurrence), occurrence)
+            combo.blockSignals(False)
+        if not self._restriction_occurrences:
+            self.left_restriction_site.addItem("未识别到常用酶切位点", None)
+            self.right_restriction_site.addItem("未识别到常用酶切位点", None)
+            return
+
+        left_index, right_index = self._default_restriction_pair()
+        self.left_restriction_site.setCurrentIndex(left_index)
+        self.right_restriction_site.setCurrentIndex(right_index)
+
+    def _default_restriction_pair(self) -> tuple[int, int]:
+        nhei_indexes = tuple(
+            index
+            for index, occurrence in enumerate(self._restriction_occurrences)
+            if occurrence.enzyme_name == "NheI"
+        )
+        bamhi_indexes = tuple(
+            index
+            for index, occurrence in enumerate(self._restriction_occurrences)
+            if occurrence.enzyme_name == "BamHI"
+        )
+        if len(nhei_indexes) == len(bamhi_indexes) == 1:
+            left = self._restriction_occurrences[nhei_indexes[0]]
+            right = self._restriction_occurrences[bamhi_indexes[0]]
+            if left.cut_position <= right.cut_position:
+                return nhei_indexes[0], bamhi_indexes[0]
+        for left_index, left in enumerate(self._restriction_occurrences):
+            for right_index, right in enumerate(self._restriction_occurrences):
+                if left_index != right_index and left.cut_position <= right.cut_position:
+                    return left_index, right_index
+        return 0, 0
+
+    def _on_insertion_mode_changed(self) -> None:
+        restriction_mode = self._insertion_mode() == "restriction_sites_auto_homology"
+        for widget in (self.left_restriction_site, self.right_restriction_site):
+            self._set_form_field_visible(widget, restriction_mode)
+        self.left_homology.setReadOnly(restriction_mode)
+        self.right_homology.setReadOnly(restriction_mode)
+        if not restriction_mode:
+            self.left_homology.clear()
+            self.right_homology.clear()
+        self._refresh_resolution_preview()
+
+    def _insertion_mode(self) -> str:
+        return str(self.insertion_mode.currentData())
+
+    def _selected_restriction_sites(
+        self,
+    ) -> tuple[RestrictionSiteOccurrence, RestrictionSiteOccurrence]:
+        left = self.left_restriction_site.currentData()
+        right = self.right_restriction_site.currentData()
+        if not isinstance(left, RestrictionSiteOccurrence) or not isinstance(
+            right,
+            RestrictionSiteOccurrence,
+        ):
+            raise ValueError("请在左右下拉框中选择可用的酶切位点")
+        return left, right
+
+    def _resolve_insertion(self) -> ExpressionInsertionResolution:
+        if self._vector is None:
+            raise ValueError("请先选择载体图谱")
+        if self._insertion_mode() == "manual_homology":
+            forward_homology = self.left_homology.text().strip()
+            reverse_homology = self.right_homology.text().strip()
+            if not forward_homology or not reverse_homology:
+                raise ValueError("手动同源臂模式请填写 F 引物和 R 引物的载体同源臂")
+            forward_homology = self._normalize_manual_homology(forward_homology, "F")
+            reverse_homology = self._normalize_manual_homology(reverse_homology, "R")
+            return resolve_manual_homology(
+                self._vector.sequence,
+                forward_homology,
+                reverse_homology,
+            )
+        left, right = self._selected_restriction_sites()
+        return resolve_restriction_insertion(self._vector.sequence, left, right)
+
+    @staticmethod
+    def _normalize_manual_homology(sequence: str, primer_name: str) -> str:
+        try:
+            return normalize_dna(sequence)
+        except ValueError as error:
+            raise ValueError(
+                f"{primer_name} 引物载体同源臂只能包含 A/C/G/T，请检查输入",
+            ) from error
+
+    def _refresh_resolution_preview(self) -> None:
+        if self._updating_location:
+            return
+        self._updating_location = True
+        try:
+            resolution = self._resolve_insertion()
+        except ValueError as error:
+            self.resolution_preview.setText(f"解析失败：{error}")
+        else:
+            if self._insertion_mode() == "restriction_sites_auto_homology":
+                self.left_boundary.setValue(resolution.left_boundary)
+                self.right_boundary.setValue(resolution.right_boundary)
+                self.left_homology.setText(resolution.left_primer_homology)
+                self.right_homology.setText(resolution.right_primer_homology)
+            self.resolution_preview.setText(
+                f"已解析插入区间：[{resolution.left_boundary}, {resolution.right_boundary})，"
+                f"长度 {resolution.right_boundary - resolution.left_boundary} bp；"
+                f"F 同源臂：{resolution.left_homology_length} bp / "
+                f"GC {resolution.left_homology_gc_percent:.1f}% / "
+                f"Tm {resolution.left_homology_tm} C；"
+                f"R 同源臂：{resolution.right_homology_length} bp / "
+                f"GC {resolution.right_homology_gc_percent:.1f}% / "
+                f"Tm {resolution.right_homology_tm} C",
+            )
+        finally:
+            self._updating_location = False
 
     def profile(self) -> tuple[VectorRecord, ExpressionVectorProtocol]:
         if self._vector is None:
@@ -1146,6 +1617,7 @@ class ImportExpressionProtocolDialog(QDialog):
         version_id = self.protocol_version_id.text().strip()
         if not display_name or not version_id:
             raise ValueError("Protocol 显示名和版本 ID 不能为空")
+        resolution = self._resolve_insertion()
         fusion = self.fusion_name.text().strip() or None
         if self.stop_rule.currentData() == "preserve":
             fusion = None
@@ -1158,11 +1630,11 @@ class ImportExpressionProtocolDialog(QDialog):
             vector_record_id=self._vector.vector_record_id,
             vector_checksum=self._vector.normalized_circular_sha256,
             workflow_type="expression",
-            insertion_mode="confirmed_interval_with_homology_prefixes",
-            left_boundary=self.left_boundary.value(),
-            right_boundary=self.right_boundary.value(),
-            left_primer_homology=self.left_homology.text(),
-            right_primer_homology=self.right_homology.text(),
+            insertion_mode=self._insertion_mode(),
+            left_boundary=resolution.left_boundary,
+            right_boundary=resolution.right_boundary,
+            left_primer_homology=resolution.left_primer_homology,
+            right_primer_homology=resolution.right_primer_homology,
             kozak_sequence=self.kozak.text(),
             stop_codon_rule=self.stop_rule.currentData(),
             c_terminal_fusion_name=fusion,
@@ -1207,6 +1679,9 @@ class NewExpressionProjectDialog(QDialog):
         self.species = QComboBox()
         self.species.addItems(("human", "mouse", "rat"))
         self.transcript_accession = QLineEdit()
+        self._selected_gene_id: str | None = None
+        self.gene_symbol.textEdited.connect(self._clear_selected_gene_id)
+        self.transcript_accession.textEdited.connect(self._clear_selected_gene_id)
         transcript_row = QWidget()
         transcript_layout = QHBoxLayout(transcript_row)
         transcript_layout.setContentsMargins(0, 0, 0, 0)
@@ -1298,6 +1773,9 @@ class NewExpressionProjectDialog(QDialog):
             if line.strip()
         )
 
+    def _clear_selected_gene_id(self, _text: str = "") -> None:
+        self._selected_gene_id = None
+
     def _lookup_transcript(self) -> None:
         candidate = _lookup_transcript_candidate(
             self,
@@ -1312,6 +1790,7 @@ class NewExpressionProjectDialog(QDialog):
         if candidate.gene_symbol:
             self.gene_symbol.setText(candidate.gene_symbol)
         self.cds_sequence.setPlainText(candidate.cds_sequence)
+        self._selected_gene_id = candidate.gene_id
 
     def _accept_validated(self) -> None:
         if not self.project_id.text().strip() or not self.gene_symbol.text().strip():
@@ -1346,6 +1825,7 @@ class NewExpressionProjectDialog(QDialog):
             protocol=protocol,
             clones_per_construct=self.clones_per_construct.value(),
             transcript_accession=self.transcript_accession.text().strip() or None,
+            gene_id=self._selected_gene_id,
             sequencing_method=self.sequencing_method.currentText(),
             design_confirmation_reason=(
                 self.confirmation_reason.toPlainText().strip() or None
@@ -1367,8 +1847,7 @@ class ImportReporterProtocolDialog(ImportExpressionProtocolDialog):
                 label.hide()
             widget.hide()
         self.note.setText(
-            "该入口用于保存已确认插入边界和同源臂的 GL002/reporter 载体。"
-            "保存后，新项目可直接选择；载体校验值变化时会拒绝套用。",
+            "软件解析插入位置与引物同源臂；保存前仍需按实验 SOP 人工复核。",
         )
 
     def load_vector_path(self, path: Path) -> None:
@@ -1385,6 +1864,7 @@ class ImportReporterProtocolDialog(ImportExpressionProtocolDialog):
         version_id = self.protocol_version_id.text().strip()
         if not display_name or not version_id:
             raise ValueError("Protocol 显示名和版本 ID 不能为空")
+        resolution = self._resolve_insertion()
         protocol = ReporterVectorProtocol(
             protocol_id=version_id.rsplit("-v", 1)[0],
             protocol_version_id=version_id,
@@ -1394,11 +1874,11 @@ class ImportReporterProtocolDialog(ImportExpressionProtocolDialog):
             vector_record_id=self._vector.vector_record_id,
             vector_checksum=self._vector.normalized_circular_sha256,
             workflow_type="promoter_luciferase_reporter",
-            insertion_mode="confirmed_interval_with_homology_prefixes",
-            left_boundary=self.left_boundary.value(),
-            right_boundary=self.right_boundary.value(),
-            left_primer_homology=self.left_homology.text(),
-            right_primer_homology=self.right_homology.text(),
+            insertion_mode=self._insertion_mode(),
+            left_boundary=resolution.left_boundary,
+            right_boundary=resolution.right_boundary,
+            left_primer_homology=resolution.left_primer_homology,
+            right_primer_homology=resolution.right_primer_homology,
             default_sequencing_method="Nanopore",
         )
         validation = validate_reporter_protocol(self._vector, protocol)
@@ -1923,6 +2403,53 @@ class DueDateAdjustmentDialog(QDialog):
         return selected, self.note.toPlainText().strip()
 
 
+class MolecularTrackingNumbersDialog(QDialog):
+    def __init__(
+        self,
+        *,
+        internal_project_no: str = "",
+        primer_submission_no: str = "",
+        primer_vendor_order_no: str = "",
+        correction: bool = False,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("修改项目/引物编号" if correction else "记录项目/引物编号")
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.internal_project_no = QLineEdit(internal_project_no)
+        self.primer_submission_no = QLineEdit(primer_submission_no)
+        self.primer_vendor_order_no = QLineEdit(primer_vendor_order_no)
+        self.note = QLineEdit()
+        form.addRow("内部编号", self.internal_project_no)
+        form.addRow("引物送单号", self.primer_submission_no)
+        form.addRow("引物订单号", self.primer_vendor_order_no)
+        if correction:
+            form.addRow("修改说明", self.note)
+        layout.addLayout(form)
+        hint = QLabel("三项编号均可留空，也可以稍后在项目详情中补录或修改。")
+        hint.setObjectName("mutedLabel")
+        layout.addWidget(hint)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel
+            | QDialogButtonBox.StandardButton.Ok,
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("保存")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setObjectName("primaryButton")
+        if correction:
+            buttons.accepted.connect(self._accept_correction)
+        else:
+            buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _accept_correction(self) -> None:
+        if not self.note.text().strip():
+            QMessageBox.warning(self, "缺少修改说明", "修改项目/引物编号时请填写说明。")
+            return
+        self.accept()
+
+
 class SequencingTrackingDialog(QDialog):
     def __init__(
         self,
@@ -1933,18 +2460,18 @@ class SequencingTrackingDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("修改送测信息" if correction else "记录送测信息")
+        self.setWindowTitle("修改测序编号" if correction else "记录测序编号")
         layout = QVBoxLayout(self)
         form = QFormLayout()
         self.internal_submission_no = QLineEdit(internal_submission_no)
         self.vendor_order_no = QLineEdit(vendor_order_no)
         self.note = QLineEdit()
-        form.addRow("送测编号", self.internal_submission_no)
-        form.addRow("订单号", self.vendor_order_no)
+        form.addRow("测序送样号", self.internal_submission_no)
+        form.addRow("测序订单号", self.vendor_order_no)
         if correction:
             form.addRow("修改说明", self.note)
         layout.addLayout(form)
-        hint = QLabel("两项编号均允许暂时留空，收到供应商订单号后可再补录。")
+        hint = QLabel("两项测序编号均可留空，收到供应商订单号后可再补录。")
         hint.setObjectName("mutedLabel")
         layout.addWidget(hint)
         buttons = QDialogButtonBox(
@@ -1964,8 +2491,11 @@ class MainWindow(QMainWindow):
         "基因/目标",
         "项目大类",
         "状态",
-        "送测编号",
-        "订单号",
+        "内部编号",
+        "引物送单号",
+        "引物订单号",
+        "测序送样号",
+        "测序订单号",
         "接收日期",
         "标准完工日期",
         "剩余工作日",
@@ -2002,6 +2532,9 @@ class MainWindow(QMainWindow):
         self.workflow_service = SYNWorkflowService()
         self.state_service = SYNStateTransitionService()
         self.action_buttons: list[QPushButton] = []
+        self.accidental_wheel_guard = AccidentalWheelGuard.install(
+            QApplication.instance(),
+        )
         self.setWindowTitle("GeneSnap Workbench")
         ensure_chinese_font()
         self.resize(1480, 880)
@@ -2128,8 +2661,28 @@ class MainWindow(QMainWindow):
         root_layout.setSpacing(8)
         self.setCentralWidget(central)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        root_layout.addWidget(splitter, 1)
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.setHandleWidth(10)
+        self.main_splitter.setOpaqueResize(True)
+        self.main_splitter.setStyleSheet(
+            """
+            QSplitter::handle:horizontal {
+                background: #d4dddb;
+                border-left: 1px solid #b8c4c3;
+                border-right: 1px solid #b8c4c3;
+                margin: 0 3px;
+            }
+            QSplitter::handle:horizontal:hover { background: #9fb7b2; }
+            """,
+        )
+        root_layout.addWidget(self.main_splitter, 1)
+        self.project_panel = QWidget()
+        self.project_panel.setObjectName("projectPanel")
+        self.project_panel.setMinimumWidth(360)
+        project_panel_layout = QVBoxLayout(self.project_panel)
+        project_panel_layout.setContentsMargins(0, 0, 4, 0)
+        project_panel_layout.setSpacing(0)
         self.project_table = CopyableTableWidget()
         self.project_table.setColumnCount(len(self.PROJECT_HEADERS))
         self.project_table.setHorizontalHeaderLabels(self.PROJECT_HEADERS)
@@ -2171,9 +2724,11 @@ class MainWindow(QMainWindow):
         self.project_table.itemSelectionChanged.connect(
             self.on_project_selection_changed,
         )
-        splitter.addWidget(self.project_table)
+        project_panel_layout.addWidget(self.project_table)
+        self.main_splitter.addWidget(self.project_panel)
 
         detail = QWidget()
+        detail.setMinimumWidth(420)
         detail_layout = QVBoxLayout(detail)
         detail_layout.setContentsMargins(0, 0, 0, 0)
         header = QFrame()
@@ -2187,12 +2742,37 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.detail_title)
         header_layout.addWidget(self.detail_subtitle)
         detail_layout.addWidget(header)
-        action_bar = QWidget()
-        action_bar.setFixedHeight(42)
-        self.action_layout = QHBoxLayout(action_bar)
+        self.action_scroll_area = QScrollArea()
+        self.action_scroll_area.setObjectName("projectActionScrollArea")
+        self.action_scroll_area.setWidgetResizable(True)
+        self.action_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.action_scroll_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded,
+        )
+        self.action_scroll_area.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+        )
+        self.action_scroll_area.setSizeAdjustPolicy(
+            QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored,
+        )
+        self.action_scroll_area.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.action_scroll_area.setFixedHeight(60)
+        self.action_bar = QWidget()
+        self.action_bar.setObjectName("projectActionBar")
+        self.action_bar.setSizePolicy(
+            QSizePolicy.Policy.Minimum,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.action_layout = QHBoxLayout(self.action_bar)
         self.action_layout.setContentsMargins(0, 4, 0, 4)
+        self.action_layout.setSpacing(6)
+        self.action_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         self.action_layout.addStretch(1)
-        detail_layout.addWidget(action_bar)
+        self.action_scroll_area.setWidget(self.action_bar)
+        detail_layout.addWidget(self.action_scroll_area)
         self.detail_hint = QLabel()
         self.detail_hint.setObjectName("mutedLabel")
         self.detail_hint.setWordWrap(True)
@@ -2258,8 +2838,10 @@ class MainWindow(QMainWindow):
         self.tabs.currentChanged.connect(self._update_detail_hint)
         self._update_detail_hint(self.tabs.currentIndex())
         detail_layout.addWidget(self.tabs, 1)
-        splitter.addWidget(detail)
-        splitter.setSizes((820, 620))
+        self.main_splitter.addWidget(detail)
+        self.main_splitter.setStretchFactor(0, 3)
+        self.main_splitter.setStretchFactor(1, 2)
+        self.main_splitter.setSizes((660, 520))
 
     def _update_detail_hint(self, index: int) -> None:
         if 0 <= index < len(self.DETAIL_TAB_HINTS):
@@ -2305,6 +2887,9 @@ class MainWindow(QMainWindow):
                     summary.workflow_type,
                     interruption_type=summary.interruption_type,
                 ),
+                summary.internal_project_no,
+                summary.primer_submission_no,
+                summary.primer_vendor_order_no,
                 summary.latest_internal_submission_no,
                 summary.latest_vendor_order_no,
                 summary.received_date.isoformat(),
@@ -2317,7 +2902,7 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(value)
                 if column == 0:
                     item.setData(Qt.ItemDataRole.UserRole, summary.workflow_type)
-                if column == 8:
+                if column == 11:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.project_table.setItem(row, column, item)
             self._apply_due_color(row, remaining, summary.status)
@@ -2340,25 +2925,28 @@ class MainWindow(QMainWindow):
         *,
         interruption_type: str | None = None,
     ) -> str:
-        if workflow_type == "de_novo_gene_synthesis":
-            return display_status_label(status, workflow_type)
-        labels = {
-            "recorded": "已录入",
-            "design_completed": "设计完成/待订购",
-            "primers_ordered": "引物已订购",
-            "primers_arrived": "引物已到货",
-            "cloning_in_progress": "连接转化中",
-            "sequencing_in_progress": "送测中",
-            "add_on_in_progress": "加测中",
-            "rework_in_progress": "重做中",
-            "abnormal_or_paused": "异常" if interruption_type == "abnormal" else "暂停",
-            "sequencing_pending_analysis": "测序待分析",
-            "analysis_completed": "分析完成",
-            "plasmid_prep_in_progress": "复抽/质粒抽提中",
-            "plasmid_prep_completed": "质粒抽提完成",
-            "project_completed": "项目完成",
-        }
-        return labels.get(status, status)
+        return _history_status_label(
+            status,
+            workflow_type,
+            interruption_type=interruption_type,
+        )
+
+    def _populate_history_events(
+        self,
+        history,
+        workflow_type: str,
+    ) -> None:
+        self.history_table.setRowCount(len(history))
+        for row, event in enumerate(history):
+            values = (
+                event.occurred_at.astimezone().strftime("%Y-%m-%d %H:%M"),
+                _history_event_label(event.event_type),
+                _history_status_label(event.from_status, workflow_type),
+                _history_status_label(event.to_status, workflow_type),
+                event.note or "",
+            )
+            for column, value in enumerate(values):
+                self.history_table.setItem(row, column, QTableWidgetItem(value))
 
     def _apply_due_color(self, row: int, remaining: int, status: str) -> None:
         if status == "project_completed":
@@ -2455,7 +3043,7 @@ class MainWindow(QMainWindow):
             ("构建数量", str(len(stored.design.constructs))),
             ("每个构建克隆数", str(stored.snapshot.clones_per_construct)),
             ("项目文件夹", str(stored.project_folder)),
-        ) + _sequencing_tracking_rows(stored.snapshot)
+        ) + _molecular_tracking_rows(stored.snapshot)
         self.summary_table.setRowCount(len(values))
         for row, (label, value) in enumerate(values):
             self.summary_table.setItem(row, 0, QTableWidgetItem(label))
@@ -2509,18 +3097,10 @@ class MainWindow(QMainWindow):
             for column, value in enumerate(row_values):
                 self.experiment_table.setItem(row, column, QTableWidgetItem(value))
 
-        history = stored.snapshot.status_history
-        self.history_table.setRowCount(len(history))
-        for row, event in enumerate(history):
-            row_values = (
-                event.occurred_at.astimezone().strftime("%Y-%m-%d %H:%M"),
-                event.event_type,
-                event.from_status or "",
-                event.to_status or "",
-                event.note or "",
-            )
-            for column, value in enumerate(row_values):
-                self.history_table.setItem(row, column, QTableWidgetItem(value))
+        self._populate_history_events(
+            stored.snapshot.status_history,
+            stored.workflow_type,
+        )
 
         artifacts = self.service.reporter_repository.list_artifacts(stored.project_id)
         self.artifact_table.setRowCount(len(artifacts))
@@ -2568,7 +3148,7 @@ class MainWindow(QMainWindow):
             ("构建数量", str(len(stored.design.constructs))),
             ("每个构建克隆数", str(stored.snapshot.clones_per_construct)),
             ("项目文件夹", str(stored.project_folder)),
-        ) + _sequencing_tracking_rows(stored.snapshot)
+        ) + _molecular_tracking_rows(stored.snapshot)
         self.summary_table.setRowCount(len(values))
         for row, (label, value) in enumerate(values):
             self.summary_table.setItem(row, 0, QTableWidgetItem(label))
@@ -2630,18 +3210,10 @@ class MainWindow(QMainWindow):
             for column, value in enumerate(values_row):
                 self.experiment_table.setItem(row, column, QTableWidgetItem(value))
 
-        history = stored.snapshot.status_history
-        self.history_table.setRowCount(len(history))
-        for row, event in enumerate(history):
-            history_values = (
-                event.occurred_at.astimezone().strftime("%Y-%m-%d %H:%M"),
-                event.event_type,
-                event.from_status or "",
-                event.to_status or "",
-                event.note or "",
-            )
-            for column, value in enumerate(history_values):
-                self.history_table.setItem(row, column, QTableWidgetItem(value))
+        self._populate_history_events(
+            stored.snapshot.status_history,
+            stored.workflow_type,
+        )
 
         artifacts = self.service.expression_repository.list_artifacts(stored.project_id)
         self.artifact_table.setRowCount(len(artifacts))
@@ -2701,7 +3273,7 @@ class MainWindow(QMainWindow):
             ("Target 数量", str(stored.design.target_count)),
             ("每个 target 克隆数", str(stored.design.clones_per_target)),
             ("项目文件夹", str(stored.project_folder)),
-        ) + _sequencing_tracking_rows(stored.snapshot)
+        ) + _molecular_tracking_rows(stored.snapshot)
         self.summary_table.setRowCount(len(values))
         for row, (label, value) in enumerate(values):
             self.summary_table.setItem(row, 0, QTableWidgetItem(label))
@@ -2778,18 +3350,10 @@ class MainWindow(QMainWindow):
             for column, value in enumerate(values_row):
                 self.experiment_table.setItem(row, column, QTableWidgetItem(value))
 
-        history = stored.snapshot.status_history
-        self.history_table.setRowCount(len(history))
-        for row, event in enumerate(history):
-            history_values = (
-                event.occurred_at.astimezone().strftime("%Y-%m-%d %H:%M"),
-                event.event_type,
-                event.from_status or "",
-                event.to_status or "",
-                event.note or "",
-            )
-            for column, value in enumerate(history_values):
-                self.history_table.setItem(row, column, QTableWidgetItem(value))
+        self._populate_history_events(
+            stored.snapshot.status_history,
+            stored.workflow_type,
+        )
 
         artifacts = self.service.shrna_repository.list_artifacts(stored.project_id)
         self.artifact_table.setRowCount(len(artifacts))
@@ -2861,18 +3425,10 @@ class MainWindow(QMainWindow):
                 self.oligo_table.setItem(row, column, QTableWidgetItem(value))
 
     def _populate_history(self, stored: StoredSYNProject) -> None:
-        history = stored.snapshot.status_history
-        self.history_table.setRowCount(len(history))
-        for row, event in enumerate(history):
-            values = (
-                event.occurred_at.astimezone().strftime("%Y-%m-%d %H:%M"),
-                event.event_type,
-                event.from_status or "",
-                event.to_status or "",
-                event.note or "",
-            )
-            for column, value in enumerate(values):
-                self.history_table.setItem(row, column, QTableWidgetItem(value))
+        self._populate_history_events(
+            stored.snapshot.status_history,
+            "de_novo_gene_synthesis",
+        )
 
     def _populate_experiment(self, stored: StoredSYNProject) -> None:
         snapshot = stored.snapshot
@@ -2957,6 +3513,14 @@ class MainWindow(QMainWindow):
             if widget is not None:
                 widget.hide()
                 widget.deleteLater()
+        self._sync_action_bar_geometry()
+
+    def _sync_action_bar_geometry(self) -> None:
+        self.action_bar.setMinimumWidth(0)
+        self.action_layout.invalidate()
+        self.action_layout.activate()
+        self.action_bar.setMinimumWidth(self.action_layout.minimumSize().width())
+        self.action_bar.updateGeometry()
 
     def _populate_actions(self, stored: StoredSYNProject) -> None:
         self._clear_actions()
@@ -3021,6 +3585,9 @@ class MainWindow(QMainWindow):
         label = QLabel(status_label)
         label.setObjectName("mutedLabel")
         self.action_layout.insertWidget(0, label)
+        tracking_editable = stored.snapshot.status != "project_completed"
+        if tracking_editable:
+            self._add_action("修改项目/引物编号", self._edit_molecular_tracking_numbers)
         if stored.snapshot.status == "abnormal_or_paused":
             self._add_action("恢复项目", self._resume_molecular_project, primary=True)
             self._add_visibility_action(stored.project_id)
@@ -3053,8 +3620,8 @@ class MainWindow(QMainWindow):
                 self._add_action("重新连接/转化", self._start_molecular_rework)
         elif stored.snapshot.status == "rework_in_progress":
             self._add_action("生成重做送测表", self._generate_rework_submission, primary=True)
-        if stored.snapshot.sequencing_submissions:
-            self._add_action("修改送测编号", self._edit_latest_sequencing_tracking)
+        if tracking_editable and stored.snapshot.sequencing_submissions:
+            self._add_action("修改测序编号", self._edit_latest_sequencing_tracking)
         if stored.snapshot.status != "project_completed":
             self._add_action("修正完工日期", self._adjust_current_due_date)
             self._add_action("暂停/异常", self._mark_molecular_interrupted)
@@ -3161,9 +3728,19 @@ class MainWindow(QMainWindow):
             (StoredExpressionProject, StoredShRNAProject, StoredReporterProject),
         ):
             return
+        internal_project_no = ""
+        primer_submission_no = ""
+        primer_vendor_order_no = ""
         internal_submission_no = ""
         vendor_order_no = ""
-        if action == "mark_sent_for_sequencing":
+        if action == "mark_primers_ordered":
+            dialog = MolecularTrackingNumbersDialog(parent=self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            internal_project_no = dialog.internal_project_no.text().strip()
+            primer_submission_no = dialog.primer_submission_no.text().strip()
+            primer_vendor_order_no = dialog.primer_vendor_order_no.text().strip()
+        elif action == "mark_sent_for_sequencing":
             dialog = SequencingTrackingDialog(parent=self)
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
@@ -3176,11 +3753,47 @@ class MainWindow(QMainWindow):
                 action=action,
                 actor=self.actor,
                 occurred_at=datetime.now().astimezone(),
+                internal_project_no=internal_project_no,
+                primer_submission_no=primer_submission_no,
+                primer_vendor_order_no=primer_vendor_order_no,
                 internal_submission_no=internal_submission_no,
                 vendor_order_no=vendor_order_no,
             )
         except Exception as error:
             QMessageBox.critical(self, "项目状态更新失败", str(error))
+            return
+        self.current_project = stored
+        self.refresh_projects()
+
+    def _edit_molecular_tracking_numbers(self) -> None:
+        if not isinstance(
+            self.current_project,
+            (StoredExpressionProject, StoredShRNAProject, StoredReporterProject),
+        ):
+            return
+        snapshot = self.current_project.snapshot
+        dialog = MolecularTrackingNumbersDialog(
+            internal_project_no=snapshot.internal_project_no,
+            primer_submission_no=snapshot.primer_submission_no,
+            primer_vendor_order_no=snapshot.primer_vendor_order_no,
+            correction=True,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            stored = self.service.update_molecular_tracking_numbers(
+                self.current_project.project_id,
+                workflow_type=self.current_project.workflow_type,
+                internal_project_no=dialog.internal_project_no.text(),
+                primer_submission_no=dialog.primer_submission_no.text(),
+                primer_vendor_order_no=dialog.primer_vendor_order_no.text(),
+                actor=self.actor,
+                occurred_at=datetime.now().astimezone(),
+                note=dialog.note.text(),
+            )
+        except Exception as error:
+            QMessageBox.critical(self, "项目/引物编号更新失败", str(error))
             return
         self.current_project = stored
         self.refresh_projects()
@@ -3296,7 +3909,7 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         if not dialog.note.text().strip():
-            QMessageBox.warning(self, "缺少修改说明", "补录或修改送测编号时请填写说明。")
+            QMessageBox.warning(self, "缺少修改说明", "补录或修改测序编号时请填写说明。")
             return
         try:
             stored = self.service.update_latest_sequencing_tracking(
@@ -3506,26 +4119,18 @@ class MainWindow(QMainWindow):
             (StoredExpressionProject, StoredShRNAProject, StoredReporterProject),
         ):
             return
-        latest = self._latest_clone_results(self.current_project)
-        usable = tuple(
-            record
-            for record in latest.values()
-            if record.status == "pass" or record.manually_confirmed_usable
-        )
-        selected = []
-        seen_owners = set()
-        for record in usable:
-            owner = (
-                record.construct_id
-                if isinstance(
-                    self.current_project,
-                    (StoredExpressionProject, StoredReporterProject),
-                )
-                else record.target_id
+        candidates, _required_owners = _plasmid_prep_candidates(self.current_project)
+        if not candidates:
+            QMessageBox.information(
+                self,
+                "暂无可抽提克隆",
+                "当前没有可用克隆。请先完成测序分析或人工复核。",
             )
-            if owner not in seen_owners:
-                selected.append(record.clone_name)
-                seen_owners.add(owner)
+            return
+        dialog = PlasmidPrepSelectionDialog(self.current_project, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        selected = dialog.selected_clone_names()
         try:
             stored = self.service.transition_molecular_project(
                 self.current_project.project_id,
@@ -3533,7 +4138,7 @@ class MainWindow(QMainWindow):
                 action="start_plasmid_prep",
                 actor=self.actor,
                 occurred_at=datetime.now().astimezone(),
-                selected_clone_names=tuple(selected),
+                selected_clone_names=selected,
                 note=f"选择抽提克隆：{', '.join(selected)}",
             )
         except Exception as error:
@@ -3557,6 +4162,7 @@ class MainWindow(QMainWindow):
         button.clicked.connect(callback)
         self.action_layout.insertWidget(self.action_layout.count() - 1, button)
         self.action_buttons.append(button)
+        self._sync_action_bar_geometry()
 
     def _analyze_shrna_sequencing(self) -> None:
         if not isinstance(self.current_project, StoredShRNAProject):

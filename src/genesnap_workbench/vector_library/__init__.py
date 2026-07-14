@@ -22,6 +22,15 @@ from .expression_profiles import (
     ExpressionProtocolProfileSummary,
     LocalExpressionProtocolStore,
 )
+from .expression_import import (
+    COMMON_EXPRESSION_RESTRICTION_SITES,
+    ExpressionInsertionResolution,
+    RestrictionSiteOccurrence,
+    resolve_manual_homology,
+    resolve_restriction_insertion,
+    scan_expression_restriction_sites,
+    scan_restriction_sites,
+)
 from .reporter_profiles import (
     LocalReporterProtocolStore,
     ReporterProfileIntegrityError,
@@ -48,4 +57,11 @@ __all__ = [
     "LocalReporterProtocolStore",
     "ReporterProfileIntegrityError",
     "ReporterProtocolProfileSummary",
+    "COMMON_EXPRESSION_RESTRICTION_SITES",
+    "ExpressionInsertionResolution",
+    "RestrictionSiteOccurrence",
+    "resolve_manual_homology",
+    "resolve_restriction_insertion",
+    "scan_expression_restriction_sites",
+    "scan_restriction_sites",
 ]

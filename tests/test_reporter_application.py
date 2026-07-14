@@ -37,6 +37,7 @@ class ReporterApplicationTests(unittest.TestCase):
             vector=vector,
             protocol=protocol,
             clones_per_construct=5,
+            gene_id="6446",
         )
 
     def test_create_reporter_project_saves_outputs_and_unified_summary(self):
@@ -45,6 +46,7 @@ class ReporterApplicationTests(unittest.TestCase):
         self.assertEqual(stored.snapshot.status, "design_completed")
         self.assertTrue(stored.project_folder.name.endswith("-RPT"))
         self.assertEqual(len(stored.design.constructs), 4)
+        self.assertEqual(stored.design.gene_id, "6446")
         artifacts = self.service.reporter_repository.list_artifacts(stored.project_id)
         self.assertEqual(len(artifacts), 8)
         self.assertTrue(all(item.path.exists() for item in artifacts))

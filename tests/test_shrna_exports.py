@@ -6,7 +6,7 @@ from pathlib import Path
 
 from Bio import SeqIO
 from docx import Document
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
 from genesnap_workbench.domain.shrna import (
     BlastScreenStatus,
@@ -16,6 +16,10 @@ from genesnap_workbench.domain.shrna import (
 from genesnap_workbench.project_workflow.project_folders import create_project_folder
 from genesnap_workbench.sequence_core.shrna import create_shrna_design
 from genesnap_workbench.template_engine.shrna_exports import export_shrna_bundle
+from genesnap_workbench.template_engine.workbook_templates import (
+    LocalWorkbookTemplateStore,
+    inspect_workbook_template,
+)
 from genesnap_workbench.vector_library.starters import load_public_plko1_puro_starter
 
 
@@ -30,6 +34,8 @@ def make_design(target_count: int):
         species="human",
         cds_sequence="ATG" * 300,
         vector_protocol_version_id=protocol.protocol_version_id,
+        transcript_accession="NM_000546.6",
+        gene_id="7157",
         target_count=target_count,
     )
     sequences = (
@@ -59,6 +65,28 @@ def make_design(target_count: int):
 
 
 class ShRNAExportTests(unittest.TestCase):
+    @staticmethod
+    def _primer_template(root: Path):
+        source = root / "primer-template.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "引物合成订单"
+        sheet["A1"] = "订购日期"
+        sheet.merge_cells("B1:C1")
+        for column, value in enumerate(
+            ("引物名称", "引物序列", "Gene ID", "NM号", "扩增产物长度"),
+            start=1,
+        ):
+            sheet.cell(4, column).value = value
+        workbook.save(source)
+        store = LocalWorkbookTemplateStore(root / "templates")
+        profile = store.save_import(
+            source,
+            display_name="供应商引物表",
+            inspected=inspect_workbook_template(source, kind="primer_order"),
+        )
+        return store, profile
+
     def test_three_targets_export_six_oligos_and_fifteen_clones(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = create_project_folder(
@@ -115,6 +143,41 @@ class ShRNAExportTests(unittest.TestCase):
             self.assertEqual(len(maps), 1)
             self.assertEqual(len(record.seq), len(design.plasmid_simulations[0].expected_plasmid_sequence))
             self.assertTrue(all(item.path.exists() for item in bundle.artifacts))
+
+    def test_vendor_template_receives_gene_transcript_oligo_length_and_order_date(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = create_project_folder(
+                root,
+                project_id="KD-EXPORT-1",
+                target_name="TP53",
+                folder_suffix="KD",
+            )
+            store, profile = self._primer_template(root)
+            design = make_design(1)
+
+            bundle = export_shrna_bundle(
+                design,
+                workspace,
+                generated_at=NOW,
+                primer_order_date=date(2026, 7, 15),
+                sequencing_order_date=date(2026, 7, 16),
+                workbook_template_store=store,
+                primer_template_id=profile.template_id,
+            )
+
+            sheet = load_workbook(bundle.path_for("primer_order_xlsx"))["引物合成订单"]
+            rows = list(sheet.iter_rows(min_row=5, max_row=6, values_only=True))
+            self.assertEqual(sheet["B1"].value.date(), NOW.date())
+            self.assertTrue(all(row[2] == "7157" for row in rows))
+            self.assertTrue(all(row[3] == "NM_000546.6" for row in rows))
+            self.assertEqual(
+                tuple(row[4] for row in rows),
+                (
+                    len(design.targets[0].oligos.forward_sequence),
+                    len(design.targets[0].oligos.reverse_sequence),
+                ),
+            )
 
 
 if __name__ == "__main__":

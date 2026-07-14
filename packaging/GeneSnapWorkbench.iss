@@ -1,12 +1,12 @@
 #define MyAppName "GeneSnap Workbench"
-#define MyAppVersion "0.3.3"
+#define MyAppVersion "0.3.4"
 #define MyAppPublisher "GeneSnap"
 #define MyAppExeName "GeneSnapWorkbench.exe"
 #ifndef MyAppId
 #define MyAppId "{{B6B230ED-782B-4B82-87B3-C0FCF97629C1}"
 #endif
 #ifndef MyOutputBaseFilename
-#define MyOutputBaseFilename "GeneSnapWorkbench_Setup_v0.3.3"
+#define MyOutputBaseFilename "GeneSnapWorkbench_Setup_v0.3.4"
 #endif
 
 [Setup]

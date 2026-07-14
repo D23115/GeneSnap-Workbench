@@ -52,7 +52,7 @@ class SequencingSubmissionTests(unittest.TestCase):
             actor="tester",
             occurred_at=NOW,
             internal_submission_no="SEQ-20260713-01",
-            vendor_order_no="ORDER-123456",
+            vendor_order_no="TSM123456",
         )
 
         self.assertEqual(sent.snapshot.status, "sequencing_in_progress")
@@ -61,7 +61,7 @@ class SequencingSubmissionTests(unittest.TestCase):
         self.assertEqual(submission.round_no, 1)
         self.assertEqual(submission.submission_kind, "initial")
         self.assertEqual(submission.internal_submission_no, "SEQ-20260713-01")
-        self.assertEqual(submission.vendor_order_no, "ORDER-123456")
+        self.assertEqual(submission.vendor_order_no, "TSM123456")
         self.assertEqual(
             submission.sample_names,
             tuple(f"TP53-FL-{index}" for index in range(1, 6)),
@@ -71,7 +71,7 @@ class SequencingSubmissionTests(unittest.TestCase):
             item for item in self.service.list_all_projects() if item.project_id == sent.project_id
         )
         self.assertEqual(summary.latest_internal_submission_no, "SEQ-20260713-01")
-        self.assertEqual(summary.latest_vendor_order_no, "ORDER-123456")
+        self.assertEqual(summary.latest_vendor_order_no, "TSM123456")
 
     def test_latest_tracking_numbers_can_be_corrected_without_losing_original_event(self):
         sent = self.service.transition_molecular_project(

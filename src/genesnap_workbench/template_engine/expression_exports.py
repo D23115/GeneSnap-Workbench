@@ -29,8 +29,8 @@ from genesnap_workbench.template_engine.workbook_templates import (
 )
 from genesnap_workbench.project_workflow.project_folders import ProjectWorkspace
 
-from .syn_exports import GeneratedArtifact
 from .genbank_io import write_genbank_utf8
+from .syn_exports import GeneratedArtifact
 
 
 class ExpressionExportError(ValueError):
@@ -160,14 +160,21 @@ def _primer_records(
 ) -> tuple[dict[str, object], ...]:
     records: list[dict[str, object]] = []
     for construct, plan in _construct_pairs(design, vector_result):
+        fragment_lengths = {
+            fragment.fragment_no: len(fragment.sequence)
+            for fragment in construct.fragments
+        }
         for primer in plan.primers:
             records.append(
                 {
                     "primer_name": primer.name,
                     "sequence": primer.sequence,
                     "gene_symbol": design.gene_symbol,
+                    "gene_id": design.gene_id,
+                    "transcript_accession": design.transcript_accession,
                     "direction": primer.direction,
                     "length": len(primer.sequence),
+                    "product_length": fragment_lengths[primer.fragment_no],
                     "note": construct.construct_name,
                 },
             )
@@ -386,6 +393,7 @@ def export_expression_bundle(
             primer_template_id,
             records=_primer_records(design, vector_result),
             contact=contact_profile,
+            document_values={"order_date": generated_at.date()},
             output_path=primer_path,
         )
     else:

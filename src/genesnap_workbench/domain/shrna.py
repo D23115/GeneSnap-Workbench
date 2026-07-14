@@ -301,6 +301,9 @@ class ShRNAProjectSnapshot:
     frozen_remaining_workdays: int | None = None
     accumulated_paused_workdays: int = 0
     interruption_history: tuple[ProjectInterruptionRecord, ...] = ()
+    internal_project_no: str = ""
+    primer_submission_no: str = ""
+    primer_vendor_order_no: str = ""
 
     def append_clone_results(
         self,

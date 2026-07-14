@@ -35,6 +35,7 @@ class ExpressionApplicationTests(unittest.TestCase):
             vector=vector,
             protocol=protocol,
             clones_per_construct=5,
+            gene_id="7157",
             primer_vendor_name="标准",
             sequencing_vendor_name="标准",
         )
@@ -49,6 +50,7 @@ class ExpressionApplicationTests(unittest.TestCase):
         self.assertEqual(len(artifacts), 6)
         self.assertTrue(all(item.path.exists() for item in artifacts))
         self.assertEqual(len(stored.design.constructs), 2)
+        self.assertEqual(stored.design.gene_id, "7157")
         self.assertEqual(stored.snapshot.clones_per_construct, 5)
 
         summary = next(

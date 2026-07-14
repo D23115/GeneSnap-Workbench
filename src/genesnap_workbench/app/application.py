@@ -149,6 +149,14 @@ def _latest_tracking_values(snapshot) -> tuple[str, str]:
     return latest.internal_submission_no, latest.vendor_order_no
 
 
+def _molecular_tracking_values(snapshot) -> tuple[str, str, str]:
+    return (
+        getattr(snapshot, "internal_project_no", ""),
+        getattr(snapshot, "primer_submission_no", ""),
+        getattr(snapshot, "primer_vendor_order_no", ""),
+    )
+
+
 def _mark_latest_submission_analyzed(snapshot):
     submissions = getattr(snapshot, "sequencing_submissions", ())
     if not submissions:
@@ -236,6 +244,7 @@ class NewExpressionProjectCommand:
     design_confirmation_reason: str | None = None
     primer_template_id: str | None = None
     sequencing_template_id: str | None = None
+    gene_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,6 +268,7 @@ class NewReporterProjectCommand:
     design_confirmation_reason: str | None = None
     primer_template_id: str | None = None
     sequencing_template_id: str | None = None
+    gene_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +290,9 @@ class UnifiedProjectSummary:
     interruption_type: str | None = None
     frozen_remaining_workdays: int | None = None
     is_manually_hidden: bool = False
+    internal_project_no: str = ""
+    primer_submission_no: str = ""
+    primer_vendor_order_no: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -562,6 +575,9 @@ class GeneSnapApplicationService:
                         usable_clone_names=usable,
                         latest_internal_submission_no=_latest_tracking_values(stored.snapshot)[0],
                         latest_vendor_order_no=_latest_tracking_values(stored.snapshot)[1],
+                        internal_project_no=_molecular_tracking_values(stored.snapshot)[0],
+                        primer_submission_no=_molecular_tracking_values(stored.snapshot)[1],
+                        primer_vendor_order_no=_molecular_tracking_values(stored.snapshot)[2],
                         interruption_type=getattr(stored.snapshot, "interruption_type", None),
                         frozen_remaining_workdays=getattr(
                             stored.snapshot,
@@ -608,6 +624,9 @@ class GeneSnapApplicationService:
                         usable_clone_names=usable,
                         latest_internal_submission_no=_latest_tracking_values(stored.snapshot)[0],
                         latest_vendor_order_no=_latest_tracking_values(stored.snapshot)[1],
+                        internal_project_no=_molecular_tracking_values(stored.snapshot)[0],
+                        primer_submission_no=_molecular_tracking_values(stored.snapshot)[1],
+                        primer_vendor_order_no=_molecular_tracking_values(stored.snapshot)[2],
                         interruption_type=getattr(stored.snapshot, "interruption_type", None),
                         frozen_remaining_workdays=getattr(
                             stored.snapshot,
@@ -666,6 +685,9 @@ class GeneSnapApplicationService:
                         usable_clone_names=usable,
                         latest_internal_submission_no=_latest_tracking_values(stored.snapshot)[0],
                         latest_vendor_order_no=_latest_tracking_values(stored.snapshot)[1],
+                        internal_project_no=_molecular_tracking_values(stored.snapshot)[0],
+                        primer_submission_no=_molecular_tracking_values(stored.snapshot)[1],
+                        primer_vendor_order_no=_molecular_tracking_values(stored.snapshot)[2],
                         interruption_type=getattr(stored.snapshot, "interruption_type", None),
                         frozen_remaining_workdays=getattr(
                             stored.snapshot,
@@ -721,6 +743,9 @@ class GeneSnapApplicationService:
         occurred_at: datetime,
         selected_clone_names: tuple[str, ...] = (),
         note: str | None = None,
+        internal_project_no: str = "",
+        primer_submission_no: str = "",
+        primer_vendor_order_no: str = "",
         internal_submission_no: str = "",
         vendor_order_no: str = "",
     ) -> StoredExpressionProject | StoredShRNAProject | StoredReporterProject:
@@ -749,7 +774,14 @@ class GeneSnapApplicationService:
             )
 
         snapshot = stored.snapshot
-        if action == "mark_sent_for_sequencing":
+        if action == "mark_primers_ordered":
+            snapshot = replace(
+                snapshot,
+                internal_project_no=internal_project_no.strip(),
+                primer_submission_no=primer_submission_no.strip(),
+                primer_vendor_order_no=primer_vendor_order_no.strip(),
+            )
+        elif action == "mark_sent_for_sequencing":
             if workflow_type in {"expression", "promoter_luciferase_reporter"}:
                 sample_names = tuple(
                     f"{construct.construct_name}-{clone_no}"
@@ -818,6 +850,75 @@ class GeneSnapApplicationService:
                 from_status=expected_status,
                 to_status=next_status,
                 note=note,
+                source="user",
+            ),
+        )
+        repository.save_snapshot(
+            project_id,
+            snapshot,
+            expected_revision=stored.snapshot.revision,
+            updated_at=occurred_at,
+        )
+        return repository.load_project(project_id)
+
+    def update_molecular_tracking_numbers(
+        self,
+        project_id: str,
+        *,
+        workflow_type: str,
+        internal_project_no: str,
+        primer_submission_no: str,
+        primer_vendor_order_no: str,
+        actor: str,
+        occurred_at: datetime,
+        note: str,
+    ) -> StoredExpressionProject | StoredShRNAProject | StoredReporterProject:
+        clean_note = note.strip()
+        if not clean_note:
+            raise ValueError("修改项目/引物编号时必须填写修改说明")
+        if workflow_type == "expression":
+            repository = self.expression_repository
+            stored = repository.load_project(project_id)
+            event_type = ExpressionAuditEvent
+        elif workflow_type == "shrna_knockdown":
+            repository = self.shrna_repository
+            stored = repository.load_project(project_id)
+            event_type = ShRNAAuditEvent
+        elif workflow_type == "promoter_luciferase_reporter":
+            repository = self.reporter_repository
+            stored = repository.load_project(project_id)
+            event_type = ReporterAuditEvent
+        else:
+            raise ValueError(f"该操作不支持工作流：{workflow_type}")
+        old_internal_project_no = stored.snapshot.internal_project_no
+        old_primer_submission_no = stored.snapshot.primer_submission_no
+        old_primer_vendor_order_no = stored.snapshot.primer_vendor_order_no
+        new_internal_project_no = internal_project_no.strip()
+        new_primer_submission_no = primer_submission_no.strip()
+        new_primer_vendor_order_no = primer_vendor_order_no.strip()
+        snapshot = replace(
+            stored.snapshot,
+            internal_project_no=new_internal_project_no,
+            primer_submission_no=new_primer_submission_no,
+            primer_vendor_order_no=new_primer_vendor_order_no,
+        )
+        audit_note = (
+            f"{clean_note}；"
+            f"内部编号：{old_internal_project_no or '-'} -> {new_internal_project_no or '-'}；"
+            f"引物送单号：{old_primer_submission_no or '-'} -> "
+            f"{new_primer_submission_no or '-'}；"
+            f"引物订单号：{old_primer_vendor_order_no or '-'} -> "
+            f"{new_primer_vendor_order_no or '-'}"
+        )
+        snapshot = snapshot.append_status_event(
+            event_type(
+                event_id=f"update-molecular-tracking-numbers-{uuid4()}",
+                event_type="update_molecular_tracking_numbers",
+                occurred_at=occurred_at,
+                actor=actor,
+                from_status=stored.snapshot.status,
+                to_status=stored.snapshot.status,
+                note=audit_note,
                 source="user",
             ),
         )
@@ -1605,6 +1706,7 @@ class GeneSnapApplicationService:
             design_version_id=f"{command.project_id}-v1",
             created_at=created_at,
         )
+        design = replace(design, gene_id=command.gene_id)
         if design.requires_confirmation:
             if not (command.design_confirmation_reason or "").strip():
                 raise DesignConfirmationRequired(
@@ -1712,6 +1814,7 @@ class GeneSnapApplicationService:
             design_version_id=f"{command.project_id}-v1",
             created_at=created_at,
         )
+        design = replace(design, gene_id=command.gene_id)
         if design.requires_confirmation:
             if not (command.design_confirmation_reason or "").strip():
                 raise DesignConfirmationRequired(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import copy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 from pathlib import Path
@@ -41,6 +41,11 @@ _TABLE_ALIASES = {
             "sequence",
         ),
         "gene_symbol": _aliases("基因", "基因名", "目标基因", "gene"),
+        "gene_id": _aliases("Gene ID", "基因ID"),
+        "transcript_accession": _aliases("NM号", "转录本号"),
+        "product_length": _aliases(
+            "扩增产物长度", "PCR产物长度", "扩展产物长度"
+        ),
         "direction": _aliases("方向", "引物方向", "direction"),
         "length": _aliases("长度", "碱基数", "长度nt", "length"),
         "purification": _aliases(
@@ -65,6 +70,11 @@ _TABLE_ALIASES = {
         "sample_name": _aliases("样本名称", "样品名称", "送测名称", "管号", "sample"),
         "primer_name": _aliases("测序引物", "引物名称", "通用引物", "primer"),
         "gene_symbol": _aliases("基因", "基因名", "目标基因", "gene"),
+        "gene_id": _aliases("Gene ID", "基因ID"),
+        "transcript_accession": _aliases("NM号", "转录本号"),
+        "product_length": _aliases(
+            "扩增产物长度", "PCR产物长度", "扩展产物长度"
+        ),
         "clone_no": _aliases("克隆号", "克隆编号", "clone"),
         "method": _aliases("测序方式", "测序类型", "测序方法", "method"),
         "note": _aliases("备注", "特殊说明", "note"),
@@ -79,6 +89,10 @@ _CONTACT_ALIASES = {
     "email": _aliases("电子邮箱", "邮箱", "客户Email", "email", "e-mail"),
     "address": _aliases("收货地址", "联系地址", "客户地址", "地址"),
     "customer_id": _aliases("客户编号", "客户代码", "账号", "客户ID"),
+}
+
+_DOCUMENT_ALIASES = {
+    "order_date": _aliases("订购日期", "下单日期", "订单日期"),
 }
 
 
@@ -111,6 +125,7 @@ class WorkbookTemplateInspection:
     data_start_row: int
     table_columns: dict[str, int]
     contact_cells: dict[str, str]
+    document_cells: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +146,7 @@ class WorkbookTemplateProfile:
     data_start_row: int
     table_columns: dict[str, int]
     contact_cells: dict[str, str]
+    document_cells: dict[str, str] = field(default_factory=dict)
 
 
 def _match_field(kind: str, value: object) -> str | None:
@@ -139,6 +155,45 @@ def _match_field(kind: str, value: object) -> str | None:
         if normalized in aliases:
             return field_name
     return None
+
+
+def _merged_anchor_cell(sheet: Any, row: int, column: int) -> Any:
+    for merged_range in sheet.merged_cells.ranges:
+        if (
+            merged_range.min_row <= row <= merged_range.max_row
+            and merged_range.min_col <= column <= merged_range.max_col
+        ):
+            return sheet.cell(merged_range.min_row, merged_range.min_col)
+    return sheet.cell(row, column)
+
+
+def _merged_anchor_for_coordinate(sheet: Any, coordinate: str) -> Any:
+    cell = sheet[coordinate]
+    return _merged_anchor_cell(sheet, cell.row, cell.column)
+
+
+def _normalize_cell_mapping(
+    sheet: Any,
+    mapping: dict[str, str],
+) -> dict[str, str]:
+    return {
+        field_name: _merged_anchor_for_coordinate(sheet, coordinate).coordinate
+        for field_name, coordinate in mapping.items()
+    }
+
+
+def _normalize_table_mapping(
+    sheet: Any,
+    mapping: dict[str, int],
+    *,
+    data_start_row: int,
+) -> dict[str, int]:
+    return {
+        field_name: _merged_anchor_cell(
+            sheet, data_start_row, column_no
+        ).column
+        for field_name, column_no in mapping.items()
+    }
 
 
 def inspect_workbook_template(path: Path, *, kind: str) -> WorkbookTemplateInspection:
@@ -166,12 +221,20 @@ def inspect_workbook_template(path: Path, *, kind: str) -> WorkbookTemplateInspe
     _, sheet_name, header_row, table_columns = best
     sheet = workbook[sheet_name]
     contact_cells: dict[str, str] = {}
+    document_cells: dict[str, str] = {}
     for row_no in range(1, min(sheet.max_row, 40) + 1):
         for column_no in range(1, min(sheet.max_column, 40) + 1):
             normalized = _normalize_label(sheet.cell(row_no, column_no).value)
             for field_name, aliases in _CONTACT_ALIASES.items():
                 if field_name not in contact_cells and normalized in aliases:
-                    contact_cells[field_name] = sheet.cell(row_no, column_no + 1).coordinate
+                    contact_cells[field_name] = _merged_anchor_cell(
+                        sheet, row_no, column_no + 1
+                    ).coordinate
+            for field_name, aliases in _DOCUMENT_ALIASES.items():
+                if field_name not in document_cells and normalized in aliases:
+                    document_cells[field_name] = _merged_anchor_cell(
+                        sheet, row_no, column_no + 1
+                    ).coordinate
 
     return WorkbookTemplateInspection(
         kind=kind,
@@ -180,6 +243,7 @@ def inspect_workbook_template(path: Path, *, kind: str) -> WorkbookTemplateInspe
         data_start_row=header_row + 1,
         table_columns=table_columns,
         contact_cells=contact_cells,
+        document_cells=document_cells,
     )
 
 
@@ -190,7 +254,7 @@ def workbook_mapping_choices(
     header_row: int,
 ) -> WorkbookMappingChoices:
     """Return labeled dropdown choices for a previously inspected workbook."""
-    workbook = load_workbook(Path(path), data_only=False, read_only=True)
+    workbook = load_workbook(Path(path), data_only=False)
     try:
         if sheet_name not in workbook.sheetnames:
             raise ValueError(f"工作表不存在：{sheet_name}")
@@ -200,7 +264,11 @@ def workbook_mapping_choices(
 
         table_choices = []
         for column_no in range(1, min(sheet.max_column, 60) + 1):
-            raw_label = sheet.cell(header_row, column_no).value
+            cell = sheet.cell(header_row, column_no)
+            anchor = _merged_anchor_cell(sheet, header_row, column_no)
+            if anchor.coordinate != cell.coordinate:
+                continue
+            raw_label = cell.value
             label = str(raw_label or "（无表头）").strip().replace("\n", " ")
             table_choices.append(
                 (column_no, f"{get_column_letter(column_no)} · {label}"),
@@ -211,10 +279,16 @@ def workbook_mapping_choices(
         last_contact_row = min(max(header_row - 1, 1), 40)
         for row_no in range(1, last_contact_row + 1):
             for column_no in range(1, min(sheet.max_column, 40) + 1):
-                raw_label = sheet.cell(row_no, column_no).value
+                cell = sheet.cell(row_no, column_no)
+                anchor = _merged_anchor_cell(sheet, row_no, column_no)
+                if anchor.coordinate != cell.coordinate:
+                    continue
+                raw_label = cell.value
                 if raw_label in (None, ""):
                     continue
-                target = f"{get_column_letter(column_no + 1)}{row_no}"
+                target = _merged_anchor_cell(
+                    sheet, row_no, column_no + 1
+                ).coordinate
                 if target in seen_cells:
                     continue
                 seen_cells.add(target)
@@ -265,6 +339,18 @@ class LocalWorkbookTemplateStore:
         workbook_filename = "template.xlsx"
         copied_path = profile_dir / workbook_filename
         shutil.copy2(source, copied_path)
+        workbook = load_workbook(source, data_only=False)
+        try:
+            sheet = workbook[inspected.sheet_name]
+            table_columns = _normalize_table_mapping(
+                sheet,
+                inspected.table_columns,
+                data_start_row=inspected.data_start_row,
+            )
+            contact_cells = _normalize_cell_mapping(sheet, inspected.contact_cells)
+            document_cells = _normalize_cell_mapping(sheet, inspected.document_cells)
+        finally:
+            workbook.close()
         profile = WorkbookTemplateProfile(
             template_id=template_id,
             display_name=display_name.strip(),
@@ -274,8 +360,9 @@ class LocalWorkbookTemplateStore:
             sheet_name=inspected.sheet_name,
             header_row=inspected.header_row,
             data_start_row=inspected.data_start_row,
-            table_columns=dict(inspected.table_columns),
-            contact_cells=dict(inspected.contact_cells),
+            table_columns=table_columns,
+            contact_cells=contact_cells,
+            document_cells=document_cells,
         )
         (profile_dir / "profile.json").write_text(
             json.dumps(asdict(profile), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -289,11 +376,27 @@ class LocalWorkbookTemplateStore:
         data["table_columns"] = {
             key: int(value) for key, value in data["table_columns"].items()
         }
-        profile = WorkbookTemplateProfile(**data)
-        workbook_path = profile_dir / profile.workbook_filename
-        if _sha256_file(workbook_path) != profile.workbook_sha256:
+        data.setdefault("document_cells", {})
+        workbook_path = profile_dir / data["workbook_filename"]
+        if _sha256_file(workbook_path) != data["workbook_sha256"]:
             raise ValueError("模板文件校验失败，可能已被外部修改")
-        return profile
+        workbook = load_workbook(workbook_path, data_only=False)
+        try:
+            sheet = workbook[data["sheet_name"]]
+            data["table_columns"] = _normalize_table_mapping(
+                sheet,
+                data["table_columns"],
+                data_start_row=int(data["data_start_row"]),
+            )
+            data["contact_cells"] = _normalize_cell_mapping(
+                sheet, data["contact_cells"]
+            )
+            data["document_cells"] = _normalize_cell_mapping(
+                sheet, data["document_cells"]
+            )
+        finally:
+            workbook.close()
+        return WorkbookTemplateProfile(**data)
 
     def list_profiles(self, kind: str | None = None) -> tuple[WorkbookTemplateProfile, ...]:
         profiles: list[WorkbookTemplateProfile] = []
@@ -310,6 +413,7 @@ class LocalWorkbookTemplateStore:
         records: tuple[dict[str, Any], ...],
         contact: ContactProfile,
         output_path: Path,
+        document_values: dict[str, Any] | None = None,
     ) -> Path:
         profile = self.load_profile(template_id)
         workbook_path = self.root / template_id / profile.workbook_filename
@@ -320,21 +424,34 @@ class LocalWorkbookTemplateStore:
         for field_name, cell_coordinate in profile.contact_cells.items():
             value = contact_values.get(field_name, "")
             if value:
-                sheet[cell_coordinate] = value
+                _merged_anchor_for_coordinate(sheet, cell_coordinate).value = value
+
+        values = document_values or {}
+        for field_name, cell_coordinate in profile.document_cells.items():
+            if field_name not in values:
+                continue
+            value = values[field_name]
+            if value is not None and value != "":
+                _merged_anchor_for_coordinate(sheet, cell_coordinate).value = value
 
         final_row = profile.data_start_row + max(len(records), 1) - 1
         clear_through = max(sheet.max_row, final_row)
+        cleared_cells: set[str] = set()
         for row_no in range(profile.data_start_row, clear_through + 1):
             for column_no in profile.table_columns.values():
-                sheet.cell(row_no, column_no).value = None
+                cell = _merged_anchor_cell(sheet, row_no, column_no)
+                if cell.coordinate in cleared_cells:
+                    continue
+                cell.value = None
+                cleared_cells.add(cell.coordinate)
 
         style_row = profile.data_start_row
         for record_index, record in enumerate(records):
             row_no = profile.data_start_row + record_index
             for field_name, column_no in profile.table_columns.items():
-                source_cell = sheet.cell(style_row, column_no)
-                target_cell = sheet.cell(row_no, column_no)
-                if row_no != style_row:
+                source_cell = _merged_anchor_cell(sheet, style_row, column_no)
+                target_cell = _merged_anchor_cell(sheet, row_no, column_no)
+                if target_cell.coordinate != source_cell.coordinate:
                     target_cell._style = copy(source_cell._style)
                     target_cell.number_format = source_cell.number_format
                     target_cell.alignment = copy(source_cell.alignment)

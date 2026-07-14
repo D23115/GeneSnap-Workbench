@@ -1,18 +1,25 @@
 import os
 import tempfile
 import unittest
+from dataclasses import replace
+from unittest.mock import patch
 from decimal import Decimal
 from datetime import date, datetime, timezone
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QDate, QItemSelectionModel, Qt
+from PySide6.QtCore import QDate, QItemSelectionModel, QPoint, QPointF, Qt
+from PySide6.QtGui import QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
     QDialogButtonBox,
+    QDateEdit,
+    QMessageBox,
     QScrollArea,
+    QSpinBox,
     QTableWidgetItem,
 )
 from Bio.Seq import Seq
@@ -31,14 +38,17 @@ from genesnap_workbench.domain.shrna import (
     BlastScreenStatus,
     ShRNACandidate,
 )
+from genesnap_workbench.sequence_core.dna import reverse_complement
 from genesnap_workbench.integrations.ncbi_transcripts import TranscriptCandidate
 from genesnap_workbench.integrations.shrna_online import ShRNAOnlineDesignResult
 from genesnap_workbench.template_engine.workbook_templates import inspect_workbook_template
+from genesnap_workbench.app import desktop as desktop_module
 from genesnap_workbench.app.desktop import (
     ImportExpressionProtocolDialog,
     ImportReporterProtocolDialog,
     ImportWorkbookTemplateDialog,
     MainWindow,
+    MolecularTrackingNumbersDialog,
     NewProjectDialog,
     NewExpressionProjectDialog,
     NewReporterProjectDialog,
@@ -52,6 +62,15 @@ from tests.test_reporter_vector_protocol import vector_and_protocol as reporter_
 
 
 NOW = datetime(2026, 7, 12, 15, 0, tzinfo=timezone.utc)
+
+
+LV037_LOCAL_INSERT_REGION = (
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "GAAGCTTGGGCTGCAGGTCGACGCTAGCGCCACC"
+    "TTTTTTTTTTTTTTTTTTTT"
+    "GAATTCCGAGGATCCATGGAC"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+)
 
 
 class DesktopUITests(unittest.TestCase):
@@ -90,6 +109,463 @@ class DesktopUITests(unittest.TestCase):
             created_at=NOW,
         )
 
+    def create_analyzed_expression_project_for_prep(self):
+        vector, protocol = vector_and_protocol()
+        stored = self.service.create_expression_project(
+            NewExpressionProjectCommand(
+                project_id="OE-PREP-UI-001",
+                gene_symbol="TP53",
+                species="human",
+                source_cds="ATG" + "GCT" * 120 + "TAA",
+                construct_lines=("FL", "1-80aa"),
+                received_date=date(2026, 7, 12),
+                due_date=date(2026, 7, 23),
+                actor="测试用户",
+                vector=vector,
+                protocol=protocol,
+                clones_per_construct=3,
+            ),
+            created_at=NOW,
+        )
+        first_construct = stored.design.constructs[0]
+        exact_read = "T" * 80 + first_construct.insert_sequence + "C" * 80
+        sequencing_dir = stored.project_folder / "03_sequencing"
+        for clone_no in (1, 2):
+            (sequencing_dir / f"vendor_{first_construct.construct_name}-{clone_no}.seq").write_text(
+                exact_read,
+                encoding="ascii",
+            )
+        analyzed = self.service.analyze_expression_sequencing(
+            stored.project_id,
+            actor="测试用户",
+            analyzed_at=NOW,
+        ).project
+        second_clone = f"{stored.design.constructs[1].construct_name}-1"
+        return self.service.confirm_expression_clone_review(
+            analyzed.project_id,
+            clone_name=second_clone,
+            usable=True,
+            note="人工复核可用于抽提",
+            actor="测试用户",
+            occurred_at=NOW,
+        )
+
+    def send_wheel(self, widget, delta: int) -> None:
+        center = widget.rect().center()
+        event = QWheelEvent(
+            QPointF(center),
+            QPointF(widget.mapToGlobal(center)),
+            QPoint(),
+            QPoint(0, delta),
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.ScrollUpdate,
+            False,
+        )
+        QApplication.sendEvent(widget, event)
+        self.qt_app.processEvents()
+
+    def test_plasmid_prep_dialog_defaults_unchecked_and_requires_every_owner(self):
+        stored = self.create_analyzed_expression_project_for_prep()
+        dialog_type = getattr(desktop_module, "PlasmidPrepSelectionDialog", None)
+        self.assertIsNotNone(dialog_type)
+        dialog = dialog_type(stored, self.window)
+        self.addCleanup(dialog.close)
+
+        self.assertEqual(
+            dialog.table.headers(),
+            ("选择", "Target/构建", "克隆名", "判定来源"),
+        )
+        self.assertEqual(dialog.table.rowCount(), 3)
+        self.assertEqual(dialog.selected_clone_names(), ())
+        self.assertTrue(
+            all(
+                dialog.table.item(row, 0).checkState() is Qt.CheckState.Unchecked
+                for row in range(dialog.table.rowCount())
+            ),
+        )
+        self.assertEqual(
+            {
+                dialog.table.item(row, 3).text()
+                for row in range(dialog.table.rowCount())
+            },
+            {"自动判定 PASS", "人工确认可用"},
+        )
+
+        first_owner = dialog.table.item(0, 1).text()
+        first_owner_rows = tuple(
+            row
+            for row in range(dialog.table.rowCount())
+            if dialog.table.item(row, 1).text() == first_owner
+        )
+        self.assertEqual(len(first_owner_rows), 2)
+        for row in first_owner_rows:
+            dialog.table.item(row, 0).setCheckState(Qt.CheckState.Checked)
+        with patch.object(QMessageBox, "warning") as warning:
+            dialog.accept()
+        self.assertNotEqual(dialog.result(), QDialog.DialogCode.Accepted)
+        self.assertIn("每个 Target/构建", warning.call_args.args[2])
+
+        remaining_row = next(
+            row
+            for row in range(dialog.table.rowCount())
+            if row not in first_owner_rows
+        )
+        dialog.table.item(remaining_row, 0).setCheckState(Qt.CheckState.Checked)
+        dialog.accept()
+
+        self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
+        self.assertEqual(len(dialog.selected_clone_names()), 3)
+
+    def test_start_plasmid_prep_cancel_preserves_status_and_confirm_uses_all_selections(self):
+        stored = self.create_analyzed_expression_project_for_prep()
+        self.window.current_project = stored
+        dialog_type = getattr(desktop_module, "PlasmidPrepSelectionDialog", None)
+        self.assertIsNotNone(dialog_type)
+
+        cancelled = dialog_type(stored, self.window)
+        self.addCleanup(cancelled.close)
+        with patch.object(desktop_module, "PlasmidPrepSelectionDialog", return_value=cancelled), patch.object(
+            cancelled,
+            "exec",
+            return_value=QDialog.DialogCode.Rejected,
+        ):
+            self.window._start_molecular_prep()
+        self.assertEqual(
+            self.service.load_expression_project(stored.project_id).snapshot.status,
+            "analysis_completed",
+        )
+
+        confirmed = dialog_type(stored, self.window)
+        self.addCleanup(confirmed.close)
+        for row in range(confirmed.table.rowCount()):
+            confirmed.table.item(row, 0).setCheckState(Qt.CheckState.Checked)
+        selected = confirmed.selected_clone_names()
+        with patch.object(desktop_module, "PlasmidPrepSelectionDialog", return_value=confirmed), patch.object(
+            confirmed,
+            "exec",
+            return_value=QDialog.DialogCode.Accepted,
+        ):
+            self.window._start_molecular_prep()
+
+        updated = self.service.load_expression_project(stored.project_id)
+        self.assertEqual(updated.snapshot.status, "plasmid_prep_in_progress")
+        self.assertEqual(updated.snapshot.selected_prep_clone_names, selected)
+        self.assertTrue(all(name in updated.snapshot.status_history[-1].note for name in selected))
+
+    def test_start_plasmid_prep_without_usable_clone_does_not_open_dialog(self):
+        vector, protocol = vector_and_protocol()
+        stored = self.service.create_expression_project(
+            NewExpressionProjectCommand(
+                project_id="OE-PREP-EMPTY-001",
+                gene_symbol="TP53",
+                species="human",
+                source_cds="ATG" + "GCT" * 120 + "TAA",
+                construct_lines=("FL",),
+                received_date=date(2026, 7, 12),
+                due_date=date(2026, 7, 23),
+                actor="测试用户",
+                vector=vector,
+                protocol=protocol,
+            ),
+            created_at=NOW,
+        )
+        analyzed = self.service.analyze_expression_sequencing(
+            stored.project_id,
+            actor="测试用户",
+            analyzed_at=NOW,
+        ).project
+        self.window.current_project = analyzed
+
+        with patch.object(QMessageBox, "information") as information, patch.object(
+            QMessageBox,
+            "critical",
+        ), patch.object(
+            desktop_module,
+            "PlasmidPrepSelectionDialog",
+            create=True,
+        ) as dialog_type:
+            self.window._start_molecular_prep()
+
+        dialog_type.assert_not_called()
+        information.assert_called_once()
+        self.assertIn("没有可用克隆", information.call_args.args[2])
+        self.assertEqual(
+            self.service.load_expression_project(stored.project_id).snapshot.status,
+            "analysis_completed",
+        )
+
+    def test_history_label_helpers_cover_current_event_and_status_ids(self):
+        event_label = getattr(desktop_module, "_history_event_label", None)
+        status_label = getattr(desktop_module, "_history_status_label", None)
+        self.assertIsNotNone(event_label)
+        self.assertIsNotNone(status_label)
+
+        expected_event_labels = {
+            "complete_design": "完成设计",
+            "mark_primers_ordered": "标记引物已订购",
+            "mark_primers_arrived": "标记引物已到货",
+            "start_cloning": "开始连接/转化",
+            "mark_sent_for_sequencing": "标记为已送测",
+            "analyze_sequencing": "分析测序",
+            "confirm_clone_usable": "人工确认克隆可用",
+            "confirm_clone_unusable": "人工确认克隆不可用",
+            "confirm_addon_sequencing": "生成加测送测表",
+            "restart_cloning": "重新连接/转化",
+            "post_rework_submission": "生成重做送测表",
+            "start_plasmid_prep": "开始质粒抽提",
+            "complete_plasmid_prep": "完成质粒抽提",
+            "complete_project": "确认项目完成",
+            "update_molecular_tracking_numbers": "修改项目/引物编号",
+            "update_sequencing_tracking": "修改测序编号",
+            "adjust_due_date": "修正标准完工日期",
+            "mark_abnormal_or_paused": "标记异常/暂停",
+            "resume_from_abnormal_or_paused": "恢复项目",
+            "mark_materials_ordered": "标记 oligo 已订购",
+            "mark_materials_arrived": "标记 oligo 已到货",
+            "start_assembly": "开始合成组装",
+            "advance_assembly_substep": "推进合成组装步骤",
+            "correct_status": "修正项目状态",
+            "begin_initial_assembly_attempt": "开始首轮合成组装",
+            "start_initial_colony_screening": "开始首轮菌落筛选",
+            "create_colonies_for_active_round": "生成本轮菌落记录",
+            "record_colony_pcr": "记录菌落 PCR",
+            "record_assembly_step": "记录合成组装实验",
+            "select_clones_for_prep": "选择克隆进行质粒小提",
+            "record_plasmid_prep": "记录质粒小提",
+            "finish_plasmid_prep": "完成质粒小提",
+            "additional_screening": "追加筛选克隆",
+            "restart_assembly": "重新合成组装",
+            "confirm_sequencing": "确认 SYN 测序结果",
+        }
+        for event_type, expected in expected_event_labels.items():
+            with self.subTest(event_type=event_type):
+                self.assertEqual(event_label(event_type), expected)
+
+        expected_status_labels = {
+            "recorded": "已录入",
+            "design_completed": "设计完成/待订购",
+            "primers_ordered": "引物已订购",
+            "primers_arrived": "引物已到货",
+            "cloning_in_progress": "连接转化中",
+            "sequencing_in_progress": "送测中",
+            "sequencing_pending_analysis": "测序待分析",
+            "add_on_in_progress": "加测中",
+            "rework_in_progress": "重做中",
+            "analysis_completed": "分析完成",
+            "plasmid_prep_in_progress": "复抽/质粒抽提中",
+            "plasmid_prep_completed": "质粒抽提完成",
+            "project_completed": "项目完成",
+            "abnormal_or_paused": "异常/暂停",
+        }
+        for status, expected in expected_status_labels.items():
+            with self.subTest(status=status):
+                self.assertEqual(status_label(status, "expression"), expected)
+        self.assertEqual(
+            status_label("materials_ordered", "de_novo_gene_synthesis"),
+            "oligo 已订购",
+        )
+        self.assertEqual(
+            status_label("materials_arrived", "de_novo_gene_synthesis"),
+            "oligo 已到货",
+        )
+        self.assertEqual(
+            status_label("syn_assembly_in_progress", "de_novo_gene_synthesis"),
+            "合成组装中",
+        )
+        self.assertEqual(
+            status_label("plasmid_prep_in_progress", "de_novo_gene_synthesis"),
+            "质粒抽提中",
+        )
+        self.assertEqual(
+            status_label("awaiting_sequencing_confirmation", "de_novo_gene_synthesis"),
+            "待测序确认",
+        )
+        self.assertEqual(status_label(None, "expression"), "-")
+        self.assertEqual(status_label("", "expression"), "-")
+        self.assertEqual(event_label(None), "-")
+        self.assertIn("未识别", event_label("future_event"))
+        self.assertIn("future_event", event_label("future_event"))
+        self.assertIn("未识别", status_label("future_status", "expression"))
+        self.assertIn("future_status", status_label("future_status", "expression"))
+
+    def test_all_four_workflows_render_history_event_and_statuses_in_chinese(self):
+        syn = self.create_project()
+        vector, protocol = vector_and_protocol()
+        expression = self.service.create_expression_project(
+            NewExpressionProjectCommand(
+                project_id="OE-HISTORY-UI-001",
+                gene_symbol="TP53",
+                species="human",
+                source_cds="ATG" + "GCT" * 120 + "TAA",
+                construct_lines=("FL",),
+                received_date=date(2026, 7, 12),
+                due_date=date(2026, 7, 23),
+                actor="测试用户",
+                vector=vector,
+                protocol=protocol,
+            ),
+            created_at=NOW,
+        )
+        shrna = self.service.create_shrna_project(
+            NewShRNAProjectCommand(
+                project_id="KD-HISTORY-UI-001",
+                gene_symbol="TP53",
+                species="human",
+                cds_sequence="ATG" * 300,
+                candidates=(
+                    ShRNACandidate(
+                        candidate_id="manual-history-1",
+                        target_sequence="GACTCCAGTGGTAATCTACTG",
+                        start_position=None,
+                        intrinsic_score=Decimal("0"),
+                        source_rank=1,
+                        blast_status=BlastScreenStatus.MANUALLY_ACCEPTED,
+                    ),
+                ),
+                target_count=1,
+                clones_per_target=5,
+                received_date=date(2026, 7, 12),
+                due_date=date(2026, 7, 23),
+                actor="测试用户",
+                vector_sequence_confirmed=True,
+            ),
+            created_at=NOW,
+        )
+        reporter_vector, reporter_protocol = reporter_vector_and_protocol()
+        reporter = self.service.create_reporter_project(
+            NewReporterProjectCommand(
+                project_id="RPT-HISTORY-UI-001",
+                gene_symbol="SGK1",
+                species="human",
+                promoter_sequence=export_promoter_sequence(),
+                construct_lines=("WT",),
+                mutation_definitions=(),
+                received_date=date(2026, 7, 12),
+                due_date=date(2026, 7, 23),
+                actor="测试用户",
+                vector=reporter_vector,
+                protocol=reporter_protocol,
+            ),
+            created_at=NOW,
+        )
+
+        for stored in (syn, shrna, expression, reporter):
+            with self.subTest(project_type=type(stored).__name__):
+                self.assertEqual(stored.snapshot.status_history[0].event_type, "complete_design")
+                self.window._populate_details(stored)
+                self.assertEqual(self.window.history_table.rowCount(), 1)
+                self.assertEqual(self.window.history_table.item(0, 1).text(), "完成设计")
+                self.assertEqual(self.window.history_table.item(0, 2).text(), "已录入")
+                self.assertEqual(
+                    self.window.history_table.item(0, 3).text(),
+                    "设计完成/待订购",
+                )
+
+    def test_main_window_installs_wheel_guard_for_closed_combo_spin_and_date(self):
+        guard_type = getattr(desktop_module, "AccidentalWheelGuard", None)
+        self.assertIsNotNone(guard_type)
+        self.assertIsInstance(self.window.accidental_wheel_guard, guard_type)
+
+        combo = QComboBox(self.window)
+        combo.addItems(("A", "B", "C"))
+        combo.setCurrentIndex(1)
+        spin = QSpinBox(self.window)
+        spin.setRange(0, 10)
+        spin.setValue(5)
+        date_edit = QDateEdit(QDate(2026, 7, 14), self.window)
+        for widget in (combo, spin, date_edit):
+            widget.show()
+        self.qt_app.processEvents()
+
+        self.send_wheel(combo, 120)
+        self.send_wheel(spin, 120)
+        self.send_wheel(date_edit, 120)
+
+        self.assertEqual(combo.currentIndex(), 1)
+        self.assertEqual(spin.value(), 5)
+        self.assertEqual(date_edit.date(), QDate(2026, 7, 14))
+        spin.stepUp()
+        self.assertEqual(spin.value(), 6)
+
+    def test_wheel_guard_allows_scrolling_an_open_combo_popup(self):
+        combo = QComboBox(self.window)
+        combo.addItems(tuple(f"选项 {index}" for index in range(30)))
+        combo.setMaxVisibleItems(5)
+        combo.view().setFixedHeight(80)
+        combo.resize(180, 32)
+        combo.show()
+        combo.showPopup()
+        self.qt_app.processEvents()
+        popup_scrollbar = combo.view().verticalScrollBar()
+        self.assertGreater(popup_scrollbar.maximum(), 0)
+        popup_scrollbar.setValue(0)
+
+        self.send_wheel(combo.view().viewport(), -120)
+
+        self.assertGreater(popup_scrollbar.value(), 0)
+        combo.hidePopup()
+
+    def test_action_bar_scrolls_horizontally_without_widening_detail_panel(self):
+        self.window._clear_actions()
+        for index in range(16):
+            self.window._add_action(f"项目操作 {index + 1}", lambda: None)
+        self.window.resize(1040, 680)
+        self.window.show()
+        self.qt_app.processEvents()
+
+        scroll_area = self.window.action_scroll_area
+        self.assertEqual(
+            scroll_area.horizontalScrollBarPolicy(),
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded,
+        )
+        self.assertEqual(
+            scroll_area.verticalScrollBarPolicy(),
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+        )
+        self.assertGreater(scroll_area.horizontalScrollBar().maximum(), 0)
+        self.assertEqual(scroll_area.verticalScrollBar().maximum(), 0)
+        self.assertLess(self.window.main_splitter.sizes()[1], 650)
+
+    def test_main_splitter_is_draggable_noncollapsible_and_contains_table_scrollbar(self):
+        self.window.resize(1040, 680)
+        self.window.show()
+        self.qt_app.processEvents()
+        splitter = self.window.main_splitter
+
+        self.assertFalse(splitter.childrenCollapsible())
+        self.assertGreaterEqual(splitter.handleWidth(), 8)
+        before = tuple(splitter.sizes())
+        splitter.moveSplitter(430, 1)
+        self.qt_app.processEvents()
+        after = tuple(splitter.sizes())
+
+        self.assertNotEqual(after, before)
+        self.assertTrue(all(size > 0 for size in after))
+        self.assertTrue(self.window.project_table.isVisible())
+        self.assertTrue(self.window.tabs.isVisible())
+        scrollbar = self.window.project_table.horizontalScrollBar()
+        scrollbar_right = scrollbar.mapTo(
+            self.window.project_panel,
+            scrollbar.rect().bottomRight(),
+        ).x()
+        self.assertLessEqual(
+            scrollbar_right,
+            self.window.project_panel.contentsRect().right(),
+        )
+
+    def test_shrna_vector_confirmation_defaults_checked_but_can_be_cleared(self):
+        dialog = NewShRNAProjectDialog(
+            self.window.calendar,
+            self.window,
+            service=self.service,
+        )
+        self.addCleanup(dialog.close)
+
+        self.assertTrue(dialog.vector_confirmation.isChecked())
+        dialog.vector_confirmation.setChecked(False)
+        self.assertFalse(dialog.vector_confirmation.isChecked())
+
     def test_main_window_is_project_dashboard_not_landing_page(self):
         self.assertEqual(self.window.windowTitle(), "GeneSnap Workbench")
         self.assertEqual(self.window.project_table.rowCount(), 0)
@@ -100,6 +576,47 @@ class DesktopUITests(unittest.TestCase):
         self.assertTrue(self.window.import_expression_protocol_action.isEnabled())
         self.assertTrue(self.window.new_reporter_project_action.isEnabled())
         self.assertTrue(self.window.import_reporter_protocol_action.isEnabled())
+
+    def test_completed_molecular_project_hides_tracking_edit_actions(self):
+        vector, protocol = vector_and_protocol()
+        stored = self.service.create_expression_project(
+            NewExpressionProjectCommand(
+                project_id="OE-COMPLETED-LOCK-001",
+                gene_symbol="TP53",
+                species="human",
+                source_cds="ATG" + "GCT" * 120 + "TAA",
+                construct_lines=("FL",),
+                received_date=date(2026, 7, 12),
+                due_date=date(2026, 7, 23),
+                actor="测试用户",
+                vector=vector,
+                protocol=protocol,
+            ),
+            created_at=NOW,
+        )
+        for action in (
+            "mark_primers_ordered",
+            "mark_primers_arrived",
+            "start_cloning",
+            "mark_sent_for_sequencing",
+        ):
+            stored = self.service.transition_molecular_project(
+                stored.project_id,
+                workflow_type=stored.workflow_type,
+                action=action,
+                actor="测试用户",
+                occurred_at=NOW,
+            )
+        completed = replace(
+            stored,
+            snapshot=replace(stored.snapshot, status="project_completed"),
+        )
+
+        self.window.current_project = completed
+        self.window._populate_molecular_actions(completed, analyze_callback=lambda: None)
+
+        self.assertNotIn("修改项目/引物编号", self.window.action_texts())
+        self.assertNotIn("修改测序编号", self.window.action_texts())
 
     def test_toolbar_shows_action_names_and_new_project_opens_type_selector(self):
         self.assertEqual(
@@ -405,6 +922,7 @@ class DesktopUITests(unittest.TestCase):
             protein_id="NP_TEST.1",
             is_mane_select=True,
             is_refseq_select=False,
+            gene_id="7157",
         )
 
         class FakeClient:
@@ -426,6 +944,16 @@ class DesktopUITests(unittest.TestCase):
         self.assertEqual(client.accession, "NM_TEST.2")
         self.assertEqual(dialog.gene_symbol.text(), "TP53")
         self.assertEqual(dialog.cds_sequence.toPlainText(), candidate.cds_sequence)
+        self.assertEqual(dialog.command("test-user").gene_id, "7157")
+
+        dialog.gene_symbol.setText("BRCA1")
+        dialog.gene_symbol.textEdited.emit("BRCA1")
+        self.assertIsNone(dialog.command("test-user").gene_id)
+
+        dialog._lookup_transcript()
+        dialog.transcript_accession.setText("NM_OTHER.1")
+        dialog.transcript_accession.textEdited.emit("NM_OTHER.1")
+        self.assertIsNone(dialog.command("test-user").gene_id)
 
     def test_shrna_dialog_reuses_saved_primer_and_sequencing_templates(self):
         def save_template(filename, kind, header):
@@ -510,6 +1038,8 @@ class DesktopUITests(unittest.TestCase):
         self.assertEqual(command.construct_lines, ("FL", "1-80aa"))
 
     def test_expression_dialog_reuses_ncbi_transcript_lookup(self):
+        vector, protocol = vector_and_protocol()
+        self.service.save_expression_profile(vector, protocol)
         candidate = TranscriptCandidate(
             accession="NM_TEST.2",
             gene_symbol="TP53",
@@ -518,6 +1048,7 @@ class DesktopUITests(unittest.TestCase):
             protein_id="NP_TEST.1",
             is_mane_select=True,
             is_refseq_select=False,
+            gene_id="7157",
         )
 
         class FakeClient:
@@ -535,6 +1066,204 @@ class DesktopUITests(unittest.TestCase):
         dialog._lookup_transcript()
 
         self.assertEqual(dialog.cds_sequence.toPlainText(), candidate.cds_sequence)
+        self.assertEqual(dialog.command("test-user").gene_id, "7157")
+
+        dialog.gene_symbol.setText("BRCA1")
+        dialog.gene_symbol.textEdited.emit("BRCA1")
+        self.assertIsNone(dialog.command("test-user").gene_id)
+
+        dialog._lookup_transcript()
+        dialog.transcript_accession.setText("NM_OTHER.1")
+        dialog.transcript_accession.textEdited.emit("NM_OTHER.1")
+        self.assertIsNone(dialog.command("test-user").gene_id)
+
+    def test_primer_tracking_dialog_cancel_does_not_advance_and_accept_saves_values(self):
+        vector, protocol = vector_and_protocol()
+        self.service.create_expression_project(
+            NewExpressionProjectCommand(
+                project_id="OE-TRACK-UI-001",
+                gene_symbol="TP53",
+                species="human",
+                source_cds="ATG" + "GCT" * 120 + "TAA",
+                construct_lines=("FL",),
+                received_date=date(2026, 7, 12),
+                due_date=date(2026, 7, 23),
+                actor="测试用户",
+                vector=vector,
+                protocol=protocol,
+            ),
+            created_at=NOW,
+        )
+        self.window.refresh_projects()
+        self.window.project_table.setCurrentCell(0, 0)
+        self.window.on_project_selection_changed()
+        button = next(
+            item for item in self.window.action_buttons if item.text() == "标记引物已订购"
+        )
+
+        cancelled_dialog = MolecularTrackingNumbersDialog(parent=self.window)
+        self.addCleanup(cancelled_dialog.close)
+        with patch(
+            "genesnap_workbench.app.desktop.MolecularTrackingNumbersDialog",
+            return_value=cancelled_dialog,
+        ), patch.object(
+            cancelled_dialog,
+            "exec",
+            return_value=QDialog.DialogCode.Rejected,
+        ):
+            button.click()
+        self.assertEqual(
+            self.service.load_expression_project("OE-TRACK-UI-001").snapshot.status,
+            "design_completed",
+        )
+
+        accepted_dialog = MolecularTrackingNumbersDialog(parent=self.window)
+        self.addCleanup(accepted_dialog.close)
+        accepted_dialog.internal_project_no.setText("INT-UI-001")
+        accepted_dialog.primer_submission_no.setText("PR-SUB-UI-001")
+        accepted_dialog.primer_vendor_order_no.setText("PR-ORDER-UI-001")
+        with patch(
+            "genesnap_workbench.app.desktop.MolecularTrackingNumbersDialog",
+            return_value=accepted_dialog,
+        ), patch.object(
+            accepted_dialog,
+            "exec",
+            return_value=QDialog.DialogCode.Accepted,
+        ):
+            button.click()
+
+        stored = self.service.load_expression_project("OE-TRACK-UI-001")
+        self.assertEqual(stored.snapshot.status, "primers_ordered")
+        self.assertEqual(stored.snapshot.internal_project_no, "INT-UI-001")
+        self.assertEqual(stored.snapshot.primer_submission_no, "PR-SUB-UI-001")
+        self.assertEqual(stored.snapshot.primer_vendor_order_no, "PR-ORDER-UI-001")
+        self.assertIn("修改项目/引物编号", self.window.action_texts())
+
+    def test_project_table_and_details_show_five_distinct_tracking_numbers(self):
+        vector, protocol = vector_and_protocol()
+        project_id = "OE-TRACK-UI-002"
+        self.service.create_expression_project(
+            NewExpressionProjectCommand(
+                project_id=project_id,
+                gene_symbol="TP53",
+                species="human",
+                source_cds="ATG" + "GCT" * 120 + "TAA",
+                construct_lines=("FL",),
+                received_date=date(2026, 7, 12),
+                due_date=date(2026, 7, 23),
+                actor="测试用户",
+                vector=vector,
+                protocol=protocol,
+            ),
+            created_at=NOW,
+        )
+        for action in ("mark_primers_ordered", "mark_primers_arrived", "start_cloning"):
+            kwargs = {}
+            if action == "mark_primers_ordered":
+                kwargs = {
+                    "internal_project_no": "INT-UI-002",
+                    "primer_submission_no": "PR-SUB-UI-002",
+                    "primer_vendor_order_no": "PR-ORDER-UI-002",
+                }
+            self.service.transition_molecular_project(
+                project_id,
+                workflow_type="expression",
+                action=action,
+                actor="测试用户",
+                occurred_at=NOW,
+                **kwargs,
+            )
+        self.service.transition_molecular_project(
+            project_id,
+            workflow_type="expression",
+            action="mark_sent_for_sequencing",
+            actor="测试用户",
+            occurred_at=NOW,
+            internal_submission_no="SEQ-SUB-UI-002",
+            vendor_order_no="SEQ-ORDER-UI-002",
+        )
+
+        self.window.refresh_projects()
+        headers = self.window.project_table.headers()
+        tracking_headers = (
+            "内部编号",
+            "引物送单号",
+            "引物订单号",
+            "测序送样号",
+            "测序订单号",
+        )
+        positions = tuple(headers.index(label) for label in tracking_headers)
+        self.assertEqual(positions, tuple(sorted(positions)))
+        expected_values = (
+            "INT-UI-002",
+            "PR-SUB-UI-002",
+            "PR-ORDER-UI-002",
+            "SEQ-SUB-UI-002",
+            "SEQ-ORDER-UI-002",
+        )
+        self.assertEqual(
+            tuple(self.window.project_table.item(0, column).text() for column in positions),
+            expected_values,
+        )
+
+        self.window.project_table.setCurrentCell(0, 0)
+        self.window.on_project_selection_changed()
+        details = {
+            self.window.summary_table.item(row, 0).text(): self.window.summary_table.item(
+                row,
+                1,
+            ).text()
+            for row in range(self.window.summary_table.rowCount())
+        }
+        self.assertEqual(
+            tuple(details[label] for label in tracking_headers),
+            expected_values,
+        )
+        self.assertIn("修改测序编号", self.window.action_texts())
+
+        self.window.project_table.setCurrentCell(0, positions[0])
+        self.window.project_table.copy_selected_cells()
+        self.assertEqual(QApplication.clipboard().text(), "INT-UI-002")
+
+    def test_project_details_keep_empty_sequencing_numbers_visible_before_submission(self):
+        vector, protocol = vector_and_protocol()
+        project_id = "OE-TRACK-UI-003"
+        self.service.create_expression_project(
+            NewExpressionProjectCommand(
+                project_id=project_id,
+                gene_symbol="TP53",
+                species="human",
+                source_cds="ATG" + "GCT" * 120 + "TAA",
+                construct_lines=("FL",),
+                received_date=date(2026, 7, 12),
+                due_date=date(2026, 7, 23),
+                actor="测试用户",
+                vector=vector,
+                protocol=protocol,
+            ),
+            created_at=NOW,
+        )
+        self.service.transition_molecular_project(
+            project_id,
+            workflow_type="expression",
+            action="mark_primers_ordered",
+            actor="测试用户",
+            occurred_at=NOW,
+            internal_project_no="INT-UI-003",
+        )
+
+        self.window.refresh_projects()
+        self.window.project_table.setCurrentCell(0, 0)
+        self.window.on_project_selection_changed()
+        details = {
+            self.window.summary_table.item(row, 0).text(): self.window.summary_table.item(
+                row,
+                1,
+            ).text()
+            for row in range(self.window.summary_table.rowCount())
+        }
+        self.assertEqual(details["测序送样号"], "")
+        self.assertEqual(details["测序订单号"], "")
 
     def test_expression_warning_results_expose_manual_review_actions(self):
         vector, protocol = vector_and_protocol()
@@ -566,28 +1295,220 @@ class DesktopUITests(unittest.TestCase):
         self.assertIn("确认可用", self.window.action_texts())
         self.assertIn("确认不可用", self.window.action_texts())
 
-    def test_import_protocol_dialog_reads_genbank_and_builds_valid_profile(self):
-        vector, protocol = vector_and_protocol()
-        vector_path = Path(self.temp_dir.name) / "artificial-vector.gb"
-        record = SeqRecord(Seq(vector.sequence), id="artificial", name="artificial")
+    def _write_genbank(
+        self,
+        sequence: str,
+        filename: str,
+        *,
+        topology: str | None = "circular",
+    ) -> Path:
+        vector_path = Path(self.temp_dir.name) / filename
+        record = SeqRecord(Seq(sequence), id="artificial", name="artificial")
         record.annotations["molecule_type"] = "DNA"
-        record.annotations["topology"] = "circular"
+        if topology is not None:
+            record.annotations["topology"] = topology
         SeqIO.write(record, vector_path, "genbank")
+        return vector_path
+
+    def test_import_protocol_dialog_displays_vector_reading_status_and_defaults_lv037_sites(self):
+        vector_path = self._write_genbank(
+            LV037_LOCAL_INSERT_REGION,
+            "LV-037-like.gb",
+        )
         dialog = ImportExpressionProtocolDialog()
         self.addCleanup(dialog.close)
         dialog.load_vector_path(vector_path)
-        dialog.display_name.setText(protocol.display_name)
-        dialog.protocol_version_id.setText(protocol.protocol_version_id)
-        dialog.left_boundary.setValue(protocol.left_boundary)
-        dialog.right_boundary.setValue(protocol.right_boundary)
-        dialog.left_homology.setText(protocol.left_primer_homology)
-        dialog.right_homology.setText(protocol.right_primer_homology)
 
         imported_vector, imported_protocol = dialog.profile()
 
-        self.assertEqual(imported_vector.sequence, vector.sequence)
-        self.assertEqual(imported_protocol.vector_checksum, vector.normalized_circular_sha256)
-        self.assertEqual(imported_protocol.left_boundary, protocol.left_boundary)
+        self.assertIn("LV-037-like.gb", dialog.vector_read_status.text())
+        self.assertIn("genbank", dialog.vector_read_status.text().lower())
+        self.assertIn(f"{len(LV037_LOCAL_INSERT_REGION)} bp", dialog.vector_read_status.text())
+        self.assertIn("文件拓扑：circular", dialog.vector_read_status.text())
+        self.assertIn("软件按环状载体处理", dialog.vector_read_status.text())
+        self.assertEqual(dialog.insertion_mode.currentData(), "restriction_sites_auto_homology")
+        self.assertIn("NheI", dialog.left_restriction_site.currentText())
+        self.assertIn("BamHI", dialog.right_restriction_site.currentText())
+        self.assertIn("0-based", dialog.left_restriction_site.currentText())
+        self.assertIn("切点", dialog.left_restriction_site.currentText())
+        for boundary in (dialog.left_boundary, dialog.right_boundary):
+            self.assertTrue(boundary.isHidden())
+            self.assertTrue(self.form_label_is_hidden(dialog, boundary))
+        self.assertEqual(imported_vector.sequence, LV037_LOCAL_INSERT_REGION)
+        self.assertEqual(imported_protocol.insertion_mode, "restriction_sites_auto_homology")
+
+    def test_import_protocol_dialog_reports_missing_file_topology_without_relabeling_it(self):
+        vector_path = self._write_genbank(
+            LV037_LOCAL_INSERT_REGION,
+            "unknown-topology.gb",
+            topology=None,
+        )
+        dialog = ImportExpressionProtocolDialog()
+        self.addCleanup(dialog.close)
+
+        dialog.load_vector_path(vector_path)
+
+        self.assertIn("文件拓扑：未提供", dialog.vector_read_status.text())
+        self.assertIn("软件按环状载体处理", dialog.vector_read_status.text())
+        self.assertNotIn("文件拓扑：circular", dialog.vector_read_status.text())
+        self.assertEqual(dialog._vector.topology, "circular")
+
+    def test_import_protocol_dialog_displays_linear_topology_and_processing(self):
+        vector_path = self._write_genbank(
+            LV037_LOCAL_INSERT_REGION,
+            "linear-vector.gb",
+            topology="linear",
+        )
+        dialog = ImportExpressionProtocolDialog()
+        self.addCleanup(dialog.close)
+
+        dialog.load_vector_path(vector_path)
+
+        self.assertIn("文件拓扑：linear", dialog.vector_read_status.text())
+        self.assertIn("软件按线性载体处理", dialog.vector_read_status.text())
+        self.assertEqual(dialog._vector.topology, "linear")
+
+    def test_import_protocol_dialog_manual_mode_requires_fresh_homology_input(self):
+        vector_path = self._write_genbank(
+            LV037_LOCAL_INSERT_REGION,
+            "LV-037-like.gb",
+        )
+        dialog = ImportExpressionProtocolDialog()
+        self.addCleanup(dialog.close)
+        dialog.load_vector_path(vector_path)
+        self.assertTrue(dialog.left_homology.text())
+        self.assertTrue(dialog.right_homology.text())
+
+        dialog.insertion_mode.setCurrentIndex(1)
+
+        self.assertEqual(dialog.left_homology.text(), "")
+        self.assertEqual(dialog.right_homology.text(), "")
+        self.assertFalse(dialog.left_homology.isReadOnly())
+        self.assertFalse(dialog.right_homology.isReadOnly())
+        for selector in (dialog.left_restriction_site, dialog.right_restriction_site):
+            self.assertTrue(selector.isHidden())
+            self.assertTrue(self.form_label_is_hidden(dialog, selector))
+        with self.assertRaisesRegex(ValueError, "请填写 F 引物.*R 引物"):
+            dialog.profile()
+
+    def test_import_protocol_dialog_manual_homology_profiles_without_boundary_input(self):
+        vector_path = self._write_genbank(
+            LV037_LOCAL_INSERT_REGION,
+            "LV-037-like.gb",
+        )
+        dialog = ImportExpressionProtocolDialog()
+        self.addCleanup(dialog.close)
+        dialog.load_vector_path(vector_path)
+        dialog.insertion_mode.setCurrentIndex(1)
+        left_cut = LV037_LOCAL_INSERT_REGION.index("GCTAGC") + 1
+        right_cut = LV037_LOCAL_INSERT_REGION.index("GGATCC") + 1
+        dialog.left_homology.setText(LV037_LOCAL_INSERT_REGION[left_cut - 20 : left_cut])
+        dialog.right_homology.setText(
+            reverse_complement(LV037_LOCAL_INSERT_REGION[right_cut : right_cut + 20]),
+        )
+
+        _, protocol = dialog.profile()
+
+        self.assertEqual(protocol.insertion_mode, "manual_homology")
+        self.assertEqual(protocol.left_boundary, left_cut)
+        self.assertEqual(protocol.right_boundary, right_cut)
+        self.assertFalse(dialog.left_homology.isReadOnly())
+        self.assertFalse(dialog.right_homology.isReadOnly())
+
+    def test_import_protocol_dialog_allows_one_restriction_occurrence_for_both_boundaries(self):
+        vector_path = self._write_genbank(
+            LV037_LOCAL_INSERT_REGION,
+            "LV-037-like.gb",
+        )
+        dialog = ImportExpressionProtocolDialog()
+        self.addCleanup(dialog.close)
+        dialog.load_vector_path(vector_path)
+        nhei_index = next(
+            index
+            for index in range(dialog.left_restriction_site.count())
+            if "NheI" in dialog.left_restriction_site.itemText(index)
+        )
+        dialog.left_restriction_site.setCurrentIndex(nhei_index)
+        dialog.right_restriction_site.setCurrentIndex(nhei_index)
+
+        _, protocol = dialog.profile()
+
+        self.assertEqual(protocol.left_boundary, protocol.right_boundary)
+        self.assertEqual(protocol.insertion_mode, "restriction_sites_auto_homology")
+
+    def test_import_protocol_dialog_reports_missing_manual_homology_in_chinese(self):
+        vector_path = self._write_genbank(
+            LV037_LOCAL_INSERT_REGION,
+            "LV-037-like.gb",
+        )
+        dialog = ImportExpressionProtocolDialog()
+        self.addCleanup(dialog.close)
+        dialog.load_vector_path(vector_path)
+        dialog.insertion_mode.setCurrentIndex(1)
+        dialog.left_homology.clear()
+        dialog.right_homology.clear()
+
+        with self.assertRaisesRegex(ValueError, "请填写 F 引物.*R 引物") as error:
+            dialog.profile()
+
+        self.assertNotIn("DNA sequence is empty", str(error.exception))
+
+    def test_import_protocol_dialog_reports_invalid_manual_homology_for_each_primer(self):
+        left_cut = LV037_LOCAL_INSERT_REGION.index("GCTAGC") + 1
+        right_cut = LV037_LOCAL_INSERT_REGION.index("GGATCC") + 1
+        valid_left = LV037_LOCAL_INSERT_REGION[left_cut - 20 : left_cut]
+        valid_right = reverse_complement(
+            LV037_LOCAL_INSERT_REGION[right_cut : right_cut + 20],
+        )
+        for primer_name in ("F", "R"):
+            with self.subTest(primer_name=primer_name):
+                vector_path = self._write_genbank(
+                    LV037_LOCAL_INSERT_REGION,
+                    f"invalid-{primer_name}.gb",
+                )
+                dialog = ImportExpressionProtocolDialog()
+                self.addCleanup(dialog.close)
+                dialog.load_vector_path(vector_path)
+                dialog.insertion_mode.setCurrentIndex(1)
+                dialog.left_homology.setText("N" if primer_name == "F" else valid_left)
+                dialog.right_homology.setText("N" if primer_name == "R" else valid_right)
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"{primer_name} 引物.*只能包含 A/C/G/T",
+                ) as error:
+                    dialog.profile()
+
+                self.assertNotIn(
+                    "Sequence contains unsupported DNA characters",
+                    str(error.exception),
+                )
+
+    def test_reporter_import_dialog_reuses_manual_homology_location_mode(self):
+        vector_path = self._write_genbank(
+            LV037_LOCAL_INSERT_REGION,
+            "GL002-like.gb",
+        )
+        dialog = ImportReporterProtocolDialog()
+        self.addCleanup(dialog.close)
+        dialog.load_vector_path(vector_path)
+        dialog.insertion_mode.setCurrentIndex(1)
+        left_cut = LV037_LOCAL_INSERT_REGION.index("GCTAGC") + 1
+        right_cut = LV037_LOCAL_INSERT_REGION.index("GGATCC") + 1
+        dialog.left_homology.setText(LV037_LOCAL_INSERT_REGION[left_cut - 20 : left_cut])
+        dialog.right_homology.setText(
+            reverse_complement(LV037_LOCAL_INSERT_REGION[right_cut : right_cut + 20]),
+        )
+
+        _, protocol = dialog.profile()
+
+        self.assertEqual(protocol.insertion_mode, "manual_homology")
+        self.assertEqual(protocol.left_boundary, left_cut)
+        self.assertEqual(protocol.right_boundary, right_cut)
+
+    def form_label_is_hidden(self, dialog: QDialog, widget) -> bool:
+        label = dialog.form.labelForField(widget)
+        return label is not None and label.isHidden()
 
     def test_reporter_project_appears_with_constructs_primers_clones_and_files(self):
         vector, protocol = reporter_vector_and_protocol()

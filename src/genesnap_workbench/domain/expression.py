@@ -135,6 +135,7 @@ class ExpressionDesignVersion:
     design_warnings: tuple[str, ...]
     requires_confirmation: bool
     confirmation_history: tuple[ExpressionDesignConfirmation, ...] = ()
+    gene_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +241,9 @@ class ExpressionProjectSnapshot:
     frozen_remaining_workdays: int | None = None
     accumulated_paused_workdays: int = 0
     interruption_history: tuple[ProjectInterruptionRecord, ...] = ()
+    internal_project_no: str = ""
+    primer_submission_no: str = ""
+    primer_vendor_order_no: str = ""
 
     def __post_init__(self) -> None:
         if not 1 <= self.clones_per_construct <= 96:

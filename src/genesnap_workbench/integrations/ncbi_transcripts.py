@@ -29,6 +29,7 @@ class TranscriptCandidate:
     protein_id: str | None
     is_mane_select: bool
     is_refseq_select: bool
+    gene_id: str | None = None
 
     @property
     def display_label(self) -> str:
@@ -185,6 +186,12 @@ class NCBITranscriptClient:
                 combined = f"{searchable} {qualifier_text}"
                 gene = (qualifiers.get("gene") or [""])[0]
                 protein_id = (qualifiers.get("protein_id") or [None])[0]
+                gene_id = None
+                for db_xref in qualifiers.get("db_xref", ()):
+                    if db_xref.startswith("GeneID:"):
+                        gene_id = db_xref.split(":", 1)[1].strip() or None
+                        if gene_id is not None:
+                            break
                 candidates.append(
                     TranscriptCandidate(
                         accession=record.id,
@@ -194,6 +201,7 @@ class NCBITranscriptClient:
                         protein_id=protein_id,
                         is_mane_select="mane select" in combined,
                         is_refseq_select="refseq select" in combined,
+                        gene_id=gene_id,
                     ),
                 )
                 break
