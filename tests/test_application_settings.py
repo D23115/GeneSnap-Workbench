@@ -11,10 +11,11 @@ class ApplicationSettingsTests(unittest.TestCase):
             service = GeneSnapApplicationService(Path(data_dir))
             chosen = Path(output_dir) / "GeneSnap 项目"
 
-            service.set_projects_root(chosen)
+            selected = service.set_projects_root(chosen)
 
             reloaded = GeneSnapApplicationService(Path(data_dir))
-            self.assertEqual(reloaded.projects_root, chosen)
+            self.assertEqual(selected, chosen.resolve())
+            self.assertEqual(reloaded.projects_root, selected)
             self.assertTrue(reloaded.has_custom_projects_root)
 
 

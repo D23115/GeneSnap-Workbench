@@ -12,7 +12,6 @@ from decimal import Decimal
 from enum import Enum
 from pathlib import Path
 
-from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqFeature import FeatureLocation, SeqFeature
 from Bio.SeqRecord import SeqRecord
@@ -27,6 +26,8 @@ from genesnap_workbench.domain.syn import (
     SYNColonyPCRRecord,
     SYNDesignVersion,
 )
+
+from .genbank_io import write_genbank_utf8
 
 
 class SYNExportError(ValueError):
@@ -353,7 +354,7 @@ def _write_genbank(
                 qualifiers={"label": [feature.label]},
             ),
         )
-    SeqIO.write(record, path, "genbank")
+    write_genbank_utf8(record, path)
 
 
 def _unique_batch_dir(

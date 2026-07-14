@@ -9,7 +9,6 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from pathlib import Path
 
-from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqFeature import FeatureLocation, SeqFeature
 from Bio.SeqRecord import SeqRecord
@@ -30,6 +29,7 @@ from genesnap_workbench.template_engine.workbook_templates import (
 from genesnap_workbench.project_workflow.project_folders import ProjectWorkspace
 
 from .syn_exports import GeneratedArtifact
+from .genbank_io import write_genbank_utf8
 
 
 class ReporterExportError(ValueError):
@@ -265,7 +265,7 @@ def _write_expected_genbank(design, construct, plan, path) -> None:
                 },
             ),
         )
-    SeqIO.write(record, path, "genbank")
+    write_genbank_utf8(record, path)
 
 
 def export_reporter_bundle(
