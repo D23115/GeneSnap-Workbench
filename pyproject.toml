@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "genesnap-workbench"
+version = "0.3.3"
+description = "A molecular construction workbench for plasmid design workflows."
+requires-python = ">=3.11"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "GeneSnap Workbench contributors" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = [
+    "biopython>=1.87",
+    "docxtpl>=0.20",
+    "openpyxl>=3.1",
+    "PySide6>=6.8",
+    "python-docx>=1.2",
+    "rapidfuzz>=3.14",
+]
+
+[project.optional-dependencies]
+build = [
+    "pyinstaller>=6.16,<7",
+]
+
+[project.scripts]
+genesnap-workbench = "genesnap_workbench.app.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+genesnap_workbench = [
+    "resources/icons/*.ico",
+    "resources/icons/*.png",
+    "resources/vectors/*.gb",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

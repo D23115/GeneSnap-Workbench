@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local environments and secrets
+.venv/
+venv/
+.env
+.env.*
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Build and release outputs
+/build/
+/dist/
+/release/
+*.exe
+*.msi
+*.zip
+*.7z
+*.sha256
+
+# Local application data and generated project outputs
+/data/
+/projects/
+/user_data/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.tmp
+
+# Private laboratory inputs are opt-in and must be reviewed before tracking
+*.dna
+*.ab1
+*.abi
+*.bam
+*.bai
+*.fastq
+*.fastq.gz
+*.xlsx
+*.xls
+~$*

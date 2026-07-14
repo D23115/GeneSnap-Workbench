@@ -1,0 +1,63 @@
+LOCUS       pUC57_public            2710 bp    DNA     circular SYN 01-JAN-1980
+DEFINITION  pUC57 sequence-only public reference.
+ACCESSION   pUC57_public
+VERSION     pUC57_public
+KEYWORDS    .
+SOURCE      .
+  ORGANISM  .
+            .
+COMMENT     Sequence-only public reference. Third-party maps, notes, and
+            annotations are not bundled. Verify the exact laboratory vector
+            before design. Source:
+            https://www.snapgene.com/plasmids/basic_cloning_vectors/pUC57
+FEATURES             Location/Qualifiers
+     source          1..2710
+                     /label="sequence-only public reference"
+ORIGIN
+        1 tcgcgcgttt cggtgatgac ggtgaaaacc tctgacacat gcagctcccg gagacggtca
+       61 cagcttgtct gtaagcggat gccgggagca gacaagcccg tcagggcgcg tcagcgggtg
+      121 ttggcgggtg tcggggctgg cttaactatg cggcatcaga gcagattgta ctgagagtgc
+      181 accatatgcg gtgtgaaata ccgcacagat gcgtaaggag aaaataccgc atcaggcgcc
+      241 attcgccatt caggctgcgc aactgttggg aagggcgatc ggtgcgggcc tcttcgctat
+      301 tacgccagct ggcgaaaggg ggatgtgctg caaggcgatt aagttgggta acgccagggt
+      361 tttcccagtc acgacgttgt aaaacgacgg ccagtgaatt cgagctcggt acctcgcgaa
+      421 tgcatctaga tatcggatcc cgggcccgtc gactgcagag gcctgcatgc aagcttggcg
+      481 taatcatggt catagctgtt tcctgtgtga aattgttatc cgctcacaat tccacacaac
+      541 atacgagccg gaagcataaa gtgtaaagcc tggggtgcct aatgagtgag ctaactcaca
+      601 ttaattgcgt tgcgctcact gcccgctttc cagtcgggaa acctgtcgtg ccagctgcat
+      661 taatgaatcg gccaacgcgc ggggagaggc ggtttgcgta ttgggcgctc ttccgcttcc
+      721 tcgctcactg actcgctgcg ctcggtcgtt cggctgcggc gagcggtatc agctcactca
+      781 aaggcggtaa tacggttatc cacagaatca ggggataacg caggaaagaa catgtgagca
+      841 aaaggccagc aaaaggccag gaaccgtaaa aaggccgcgt tgctggcgtt tttccatagg
+      901 ctccgccccc ctgacgagca tcacaaaaat cgacgctcaa gtcagaggtg gcgaaacccg
+      961 acaggactat aaagatacca ggcgtttccc cctggaagct ccctcgtgcg ctctcctgtt
+     1021 ccgaccctgc cgcttaccgg atacctgtcc gcctttctcc cttcgggaag cgtggcgctt
+     1081 tctcatagct cacgctgtag gtatctcagt tcggtgtagg tcgttcgctc caagctgggc
+     1141 tgtgtgcacg aaccccccgt tcagcccgac cgctgcgcct tatccggtaa ctatcgtctt
+     1201 gagtccaacc cggtaagaca cgacttatcg ccactggcag cagccactgg taacaggatt
+     1261 agcagagcga ggtatgtagg cggtgctaca gagttcttga agtggtggcc taactacggc
+     1321 tacactagaa gaacagtatt tggtatctgc gctctgctga agccagttac cttcggaaaa
+     1381 agagttggta gctcttgatc cggcaaacaa accaccgctg gtagcggtgg tttttttgtt
+     1441 tgcaagcagc agattacgcg cagaaaaaaa ggatctcaag aagatccttt gatcttttct
+     1501 acggggtctg acgctcagtg gaacgaaaac tcacgttaag ggattttggt catgagatta
+     1561 tcaaaaagga tcttcaccta gatcctttta aattaaaaat gaagttttaa atcaatctaa
+     1621 agtatatatg agtaaacttg gtctgacagt taccaatgct taatcagtga ggcacctatc
+     1681 tcagcgatct gtctatttcg ttcatccata gttgcctgac tccccgtcgt gtagataact
+     1741 acgatacggg agggcttacc atctggcccc agtgctgcaa tgataccgcg agacccacgc
+     1801 tcaccggctc cagatttatc agcaataaac cagccagccg gaagggccga gcgcagaagt
+     1861 ggtcctgcaa ctttatccgc ctccatccag tctattaatt gttgccggga agctagagta
+     1921 agtagttcgc cagttaatag tttgcgcaac gttgttgcca ttgctacagg catcgtggtg
+     1981 tcacgctcgt cgtttggtat ggcttcattc agctccggtt cccaacgatc aaggcgagtt
+     2041 acatgatccc ccatgttgtg caaaaaagcg gttagctcct tcggtcctcc gatcgttgtc
+     2101 agaagtaagt tggccgcagt gttatcactc atggttatgg cagcactgca taattctctt
+     2161 actgtcatgc catccgtaag atgcttttct gtgactggtg agtactcaac caagtcattc
+     2221 tgagaatagt gtatgcggcg accgagttgc tcttgcccgg cgtcaatacg ggataatacc
+     2281 gcgccacata gcagaacttt aaaagtgctc atcattggaa aacgttcttc ggggcgaaaa
+     2341 ctctcaagga tcttaccgct gttgagatcc agttcgatgt aacccactcg tgcacccaac
+     2401 tgatcttcag catcttttac tttcaccagc gtttctgggt gagcaaaaac aggaaggcaa
+     2461 aatgccgcaa aaaagggaat aagggcgaca cggaaatgtt gaatactcat actcttcctt
+     2521 tttcaatatt attgaagcat ttatcagggt tattgtctca tgagcggata catatttgaa
+     2581 tgtatttaga aaaataaaca aataggggtt ccgcgcacat ttccccgaaa agtgccacct
+     2641 gacgtctaag aaaccattat tatcatgaca ttaacctata aaaataggcg tatcacgagg
+     2701 ccctttcgtc
+//

@@ -1,0 +1,21 @@
+LOCUS       SYNTHETIC_PUC57          180 bp    DNA     circular SYN 12-JUL-2026
+DEFINITION  Artificial test vector; not a real pUC57 sequence.
+ACCESSION   SYNTHETIC_PUC57
+VERSION     SYNTHETIC_PUC57.1
+KEYWORDS    artificial sequence; unit test fixture.
+SOURCE      synthetic DNA construct
+  ORGANISM  synthetic DNA construct
+FEATURES             Location/Qualifiers
+     source          1..180
+                     /organism="synthetic DNA construct"
+                     /mol_type="other DNA"
+     misc_feature    46..51
+                     /label="EcoRV test site"
+     misc_feature    121..126
+                     /label="SmaI test site"
+ORIGIN
+        1 tcgagaccag gtccatttcc cttgaccgaa agaacgcaag gttgtgatat
+       51 cgaatatttc ttgacccgaa tgatgcctgg gtagctgtcc acagaagagc
+      101 ttatgacagt tgcatgcttg cccggggcgc ttcagacatg agagcttaac
+      151 tgtgatagcg ttgccatttc acgaaagtaa
+//

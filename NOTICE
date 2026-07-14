@@ -1,0 +1,17 @@
+GeneSnap Workbench
+Copyright 2026 GeneSnap Workbench contributors
+
+This product includes software developed by GeneSnap Workbench contributors
+and depends on third-party open-source packages distributed under their own
+licenses.
+
+Bundled public vector reference files contain nucleotide sequences, minimal
+source records, and source URLs only. Third-party maps, notes, and annotations
+are not bundled. These references are provided for software testing and user
+confirmation; they are not a substitute for verifying the exact laboratory
+vector.
+
+NCBI, Broad GPP, SnapGene, and other names are the property of their respective
+owners. Their inclusion identifies external services or public reference
+sources and does not imply endorsement. Use of external services and data is
+subject to their current terms.
